@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Sparkles, Send, Brain, Trophy, Sun, Moon, BookOpen,
-  Layers, CheckCircle2, XCircle, Plus, Trash2, Zap, Award,
+  Layers, CheckCircle2, XCircle, Trash2, Zap, Award,
   Flame, HelpCircle, RefreshCw, Users, LogIn, LogOut,
   MessageSquare, Image as ImageIcon, Shield, UserCheck,
-  Bell, Video, ClipboardCheck, Edit3, Camera, Lock, Check,
+  Bell, BellRing, Video, ClipboardCheck, Edit3, Camera, Lock, Check,
   X, Mic, Volume2, Pin, BarChart2, Clock, Play, Pause, RotateCcw,
-  FileCheck
+  FileCheck, AlertTriangle, Copy, Medal
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import {
@@ -15,16 +15,14 @@ import {
 } from 'firebase/auth';
 import {
   getFirestore, collection, addDoc, setDoc, updateDoc, deleteDoc,
-  doc, query, orderBy, limit, onSnapshot, serverTimestamp, where, arrayUnion
+  doc, query, onSnapshot, serverTimestamp, where, arrayUnion
 } from 'firebase/firestore';
 
-// স্থায়ী হোস্ট (Super Admin) ইমেইল তালিকা
 const HOST_EMAILS = [
   'shifasarker825@gmail.com',
   'shifasarker528@gmail.com'
 ];
 
-// Firebase কনফিগারেশন
 const firebaseConfig = {
   apiKey: "AIzaSyAXpE49b0F_yVMvSojIOJIqo4dIumYe_cU",
   authDomain: "edunexus-ai-48076.firebaseapp.com",
@@ -39,8 +37,45 @@ const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
 const googleProvider = new GoogleAuthProvider();
+const playNotificationTone = () => {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    gain.gain.setValueAtTime(0.08, ctx.currentTime);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.18);
+  } catch {}
+};
 
-// AI লেখার ভেতরের কাঁচা Markdown ও গণিতের চিহ্ন পরিষ্কার করার ফাংশন
+const triggerDeviceNotification = async (title, body) => {
+  playNotificationTone();
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try {
+    if ('serviceWorker' in navigator) {
+      const reg = await navigator.serviceWorker.ready;
+      if (reg && reg.showNotification) {
+        await reg.showNotification(title, {
+          body,
+          icon: 'https://cdn-icons-png.flaticon.com/512/4712/4712035.png',
+          vibrate: [200, 100, 200]
+        });
+        return;
+      }
+    }
+    new Notification(title, {
+      body,
+      icon: 'https://cdn-icons-png.flaticon.com/512/4712/4712035.png'
+    });
+  } catch {}
+};
+
 const cleanAiOutput = (rawText) => {
   if (!rawText) return '';
   let text = rawText;
@@ -58,8 +93,7 @@ const cleanAiOutput = (rawText) => {
     .replace(/\\times/g, '×')
     .replace(/\\div/g, '÷')
     .replace(/\\pm/g, '±')
-    .replace(/\\sqrt\{([^}]+)\}/g, '√($1)')
-    .replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g, '($1 / $2)')
+    .replace(/\\sqrt\{([^}]+)\}/g, '√($1)') .replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g, '($1 / $2)')
     .replace(/^#{1,6}\s*/gm, '▸ ')
     .replace(/\*\*([^*]+)\*\*/g, '$1')
     .replace(/\*([^*]+)\*/g, '$1')
@@ -67,7 +101,6 @@ const cleanAiOutput = (rawText) => {
   return text.trim();
 };
 
-// ছবি কম্প্রেস করে হালকা Base64 করার ফাংশন
 const compressImageToBase64 = (file, maxWidth = 700, quality = 0.65) => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -95,14 +128,13 @@ const compressImageToBase64 = (file, maxWidth = 700, quality = 0.65) => {
   });
 };
 
-// দ্রুতগতির Gemini API কল ফাংশন (টেক্সট + ছবি)
 const callGeminiFast = async (prompt, systemInstruction = "", base64Image = null, isJson = false) => {
   const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error("API Key পাওয়া যায়নি। Vercel Environment Variables চেক করুন।");
   }
 
-  const models = ["gemini-3.8-flash", "gemini-3.5-flash-lite"];
+  const models = ["gemini-3.8-flash", "gemini-2.5-flash"];
   const strictRules = isJson
     ? systemInstruction
     : `${systemInstruction} গুরুত্বপূর্ণ নিয়ম: কোনো উত্তরে Markdown (**, ###) বা LaTeX ($, $$) চিহ্ন ব্যবহার করবে না। গণিতের সূত্র সাধারণ টেক্সট ও ইউনিকোড চিহ্নে (যেমন: a² - b², ×, ÷, √) লিখবে। বাংলা শব্দের বানান শতভাগ শুদ্ধ রাখবে, বাংলার ভেতর ইংরেজি অক্ষর মেশাবে না।`;
@@ -148,19 +180,21 @@ export default function App() {
   const [darkMode, setDarkMode] = useState(true);
   const [activeTab, setActiveTab] = useState('tutor');
 
-  // Auth ও ইউজার প্রোফাইল
   const [user, setUser] = useState(null);
   const [userProfile, setUserProfile] = useState(null);
   const [allUsers, setAllUsers] = useState([]);
   const [authLoading, setAuthLoading] = useState(true);
+  const [notifPermission, setNotifPermission] = useState(
+    typeof Notification !== 'undefined' ? Notification.permission : 'default'
+  );
+  const [unreadNoticeCount, setUnreadNoticeCount] = useState(0);
+  const lastSeenNoticeTimeRef = useRef(Date.now());
 
-  // প্রোগ্রেস ও পমোডোরো ফোকাস টাইমার
   const [xp, setXp] = useState(() => Number(localStorage.getItem('edunexus_xp')) || 150);
   const [streak] = useState(() => Number(localStorage.getItem('edunexus_streak')) || 3);
   const [timerSeconds, setTimerSeconds] = useState(25 * 60);
   const [timerRunning, setTimerRunning] = useState(false);
 
-  // ১. AI Tutor স্টেট (ছবি + ভয়েস + টেক্সট)
   const [tutorMode, setTutorMode] = useState('Friendly Tutor');
   const defaultWelcomeMsg = [
     {
@@ -180,7 +214,6 @@ export default function App() {
   const [isListening, setIsListening] = useState(false);
   const chatEndRef = useRef(null);
 
-  // ২. Classroom Groups, Chat, Notices, Polls, Homework, Attendance, Exams, Classes
   const [groups, setGroups] = useState([]);
   const [selectedGroupId, setSelectedGroupId] = useState('global');
   const [groupSubTab, setGroupSubTab] = useState('chat');
@@ -189,14 +222,12 @@ export default function App() {
   const [newGroupSubject, setNewGroupSubject] = useState('');
   const [joinCodeInput, setJoinCodeInput] = useState('');
 
-  // গ্রুপ চ্যাট ও পিন মেসেজ
   const [groupMsgs, setGroupMsgs] = useState([]);
   const [commInput, setCommInput] = useState('');
   const [commImage, setCommImage] = useState(null);
   const [sendingComm, setSendingComm] = useState(false);
   const commEndRef = useRef(null);
 
-  // নোটিফিকেশন ও লাইভ পোল
   const [notices, setNotices] = useState([]);
   const [noticeTitle, setNoticeTitle] = useState('');
   const [noticeBody, setNoticeBody] = useState('');
@@ -205,7 +236,6 @@ export default function App() {
   const [pollOpt1, setPollOpt1] = useState('');
   const [pollOpt2, setPollOpt2] = useState('');
 
-  // হোমওয়ার্ক ও উপস্থিতি
   const [homeworks, setHomeworks] = useState([]);
   const [hwTitle, setHwTitle] = useState('');
   const [hwDue, setHwDue] = useState('');
@@ -213,20 +243,17 @@ export default function App() {
   const [attDate, setAttDate] = useState(() => new Date().toISOString().split('T')[0]);
   const [attMap, setAttMap] = useState({});
 
-  // পরীক্ষার তথ্য ও রেকর্ডেড ক্লাস
   const [classExams, setClassExams] = useState([]);
   const [editingExamId, setEditingExamId] = useState(null);
   const [examForm, setExamForm] = useState({ title: '', date: '', syllabus: '', resultsText: '' });
   const [recordedClasses, setRecordedClasses] = useState([]);
   const [classForm, setClassForm] = useState({ title: '', videoUrl: '', notes: '' });
 
-  // প্রোফাইল এডিট
   const [editName, setEditName] = useState('');
   const [editBio, setEditBio] = useState('');
   const [editPhoto, setEditPhoto] = useState('');
   const [savingProfile, setSavingProfile] = useState(false);
 
-  // ৩. AI Quiz ও Flashcards
   const [examTopic, setExamTopic] = useState('');
   const [quizQuestions, setQuizQuestions] = useState([]);
   const [currentQIndex, setCurrentQIndex] = useState(0);
@@ -247,12 +274,33 @@ export default function App() {
   const [isFlipped, setIsFlipped] = useState(false);
   const [loadingFlash, setLoadingFlash] = useState(false);
 
-  // ভূমিকা (Role): Host / Teacher / Student
+  // নতুন ফিচার স্টেট: AI Notes জেনারেটর ও Mistake Log
+  const [noteTopic, setNoteTopic] = useState('');
+  const [generatedNote, setGeneratedNote] = useState('');
+  const [loadingNote, setLoadingNote] = useState(false);
+  const [mistakes, setMistakes] = useState(() => {
+    const saved = localStorage.getItem('edunexus_mistakes');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [explainingMistakeId, setExplainingMistakeId] = useState(null);
+
   const isHost = user && HOST_EMAILS.includes(user.email?.toLowerCase());
   const currentRole = isHost ? 'host' : (userProfile?.role || 'student');
   const isTeacherOrHost = currentRole === 'host' || currentRole === 'teacher';
+  const handleEnableNotifications = async () => {
+    if (!('Notification' in window)) {
+      alert("আপনার ব্রাউজারে নোটিফিকেশন সমর্থিত নয়। Chrome ব্যবহার করুন বা অ্যাপটি হোম স্ক্রিনে Install করুন।");
+      return;
+    }
+    const perm = await Notification.requestPermission();
+    setNotifPermission(perm);
+    if (perm === 'granted') {
+      triggerDeviceNotification('EduNexus AI নোটিফিকেশন চালু হয়েছে!', 'এখন থেকে নতুন ক্লাস নোটিশ এলেই আপনি অ্যালার্ট পাবেন।');
+    } else {
+      alert("নোটিফিকেশন চালু করতে ব্রাউজার সেটিংস থেকে Allow দিন।");
+    }
+  };
 
-  // পমোডোরো ফোকাস টাইমার ইফেক্ট
   useEffect(() => {
     if (!timerRunning) return;
     const interval = setInterval(() => {
@@ -260,7 +308,7 @@ export default function App() {
         if (prev <= 1) {
           setTimerRunning(false);
           setXp((x) => x + 50);
-          alert("অভিনন্দন! ২৫ মিনিটের স্টাডি সেশন সম্পন্ন হয়েছে। আপনি +50 Bonus XP পেয়েছেন!");
+          triggerDeviceNotification('স্টাডি সেশন সম্পন্ন!', 'আপনি +50 Bonus XP অর্জন করেছেন!');
           return 25 * 60;
         }
         return prev - 1;
@@ -269,7 +317,6 @@ export default function App() {
     return () => clearInterval(interval);
   }, [timerRunning]);
 
-  // Google Auth ও Firestore প্রোফাইল সিঙ্ক
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
@@ -295,6 +342,7 @@ export default function App() {
               photoURL: currentUser.photoURL || '',
               bio: 'EduNexus AI শিক্ষার্থী',
               role: autoRole,
+              xp: 150,
               teacherRequest: false,
               joinedGroups: ['global'],
               createdAt: serverTimestamp()
@@ -328,7 +376,6 @@ export default function App() {
     });
   }, []);
 
-  // নির্বাচিত গ্রুপের সব রিয়েল-টাইম ডাটা লিসেনার
   useEffect(() => {
     const gid = selectedGroupId || 'global';
 
@@ -342,6 +389,12 @@ export default function App() {
       const list = s.docs.map(d => ({ id: d.id, ...d.data() }));
       list.sort((a, b) => (b.clientTime || 0) - (a.clientTime || 0));
       setNotices(list);
+
+      if (list.length > 0 && list[0].clientTime > lastSeenNoticeTimeRef.current) {
+        lastSeenNoticeTimeRef.current = list[0].clientTime;
+        setUnreadNoticeCount((c) => c + 1);
+        triggerDeviceNotification(`📢 ${list[0].title}`, list[0].body);
+      }
     });
 
     const unsubPolls = onSnapshot(query(collection(db, 'group_polls'), where('groupId', '==', gid)), (s) => {
@@ -381,7 +434,10 @@ export default function App() {
   }, [selectedGroupId]);
   useEffect(() => {
     localStorage.setItem('edunexus_xp', xp.toString());
-  }, [xp]);
+    if (user) {
+      updateDoc(doc(db, 'users', user.uid), { xp }).catch(() => {});
+    }
+  }, [xp, user]);
 
   useEffect(() => {
     localStorage.setItem('edunexus_chat_history', JSON.stringify(messages));
@@ -395,6 +451,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('edunexus_flashcards', JSON.stringify(flashcards));
   }, [flashcards]);
+
+  useEffect(() => {
+    localStorage.setItem('edunexus_mistakes', JSON.stringify(mistakes));
+  }, [mistakes]);
 
   const addXp = (amount) => setXp((prev) => prev + amount);
 
@@ -411,7 +471,6 @@ export default function App() {
     await signOut(auth);
   };
 
-  // ভয়েস ইনপুট (মুখে বললে বাংলায় লেখা হবে)
   const handleVoiceInput = () => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -429,7 +488,6 @@ export default function App() {
     recognition.start();
   };
 
-  // AI উত্তর পড়ে শোনানো (Text-to-Speech)
   const handleSpeakText = (text) => {
     if (!window.speechSynthesis) return;
     window.speechSynthesis.cancel();
@@ -438,7 +496,6 @@ export default function App() {
     window.speechSynthesis.speak(utterance);
   };
 
-  // AI Tutor ছবি আপলোড ও মেসেজ পাঠানো
   const handleTutorImageUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -508,7 +565,35 @@ export default function App() {
     }
   };
 
-  // টিচার হওয়ার আবেদন ও Host অনুমোদন
+  const handleGenerateNotes = async () => {
+    if (!noteTopic.trim()) return;
+    setLoadingNote(true);
+    try {
+      const reply = await callGeminiFast(
+        `"${noteTopic}" বিষয়ের ওপর পরীক্ষার প্রস্তুতির জন্য একটি গোছানো শর্ট নোট তৈরি করো (মূল সংজ্ঞা, গুরুত্বপূর্ণ সূত্র ও ৩টি সংক্ষিপ্ত প্রশ্নোত্তরসহ)।`,
+        "তুমি একজন অভিজ্ঞ শিক্ষক। স্পষ্ট পয়েন্ট আকারে শুদ্ধ বাংলায় শর্ট নোট তৈরি করো।"
+      );
+      setGeneratedNote(reply);
+      addXp(25);
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      setLoadingNote(false);
+    }
+  };
+
+  const handleExplainMistake = async (m) => {
+    setExplainingMistakeId(m.id);
+    try {
+      const exp = await callGeminiFast(
+        `প্রশ্ন: "${m.question}"। শিক্ষার্থী ভুল করে "${m.yourAnswer}" দিয়েছে, সঠিক উত্তর "${m.correctAnswer}"। কেন সঠিক উত্তরটি ঠিক তা ২-৩ লাইনে খুব সহজে বুঝিয়ে দাও।`,
+        "সহজ ও বন্ধুত্বপূর্ণ বাংলায় ব্যাখ্যা দাও।"
+      );
+      setMistakes(prev => prev.map(item => item.id === m.id ? { ...item, explanation: exp } : item));
+    } finally {
+      setExplainingMistakeId(null);
+    }
+  };
   const handleRequestTeacher = async () => {
     if (!user) return;
     await updateDoc(doc(db, 'users', user.uid), { teacherRequest: true });
@@ -520,7 +605,6 @@ export default function App() {
     await updateDoc(doc(db, 'users', targetUser.uid), { role: newRole, teacherRequest: false });
   };
 
-  // নতুন গ্রুপ তৈরি ও কোড দিয়ে জয়েন
   const handleCreateGroup = async (e) => {
     e.preventDefault();
     if (!isTeacherOrHost || !newGroupName.trim()) return;
@@ -556,7 +640,6 @@ export default function App() {
     alert(`আপনি "${found.name}" গ্রুপে যুক্ত হয়েছেন!`);
   };
 
-  // গ্রুপ চ্যাট মেসেজ, ছবি, পিন ও ইমোজি রিঅ্যাকশন
   const handleCommImageSelect = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -607,7 +690,6 @@ export default function App() {
     await updateDoc(doc(db, 'group_messages', msg.id), { likes: updated });
   };
 
-  // নোটিফিকেশন ও লাইভ পোল (কেবল Host এবং Teacher)
   const handlePostNotice = async (e) => {
     e.preventDefault();
     if (!isTeacherOrHost || !noticeTitle.trim() || !noticeBody.trim()) return;
@@ -649,7 +731,6 @@ export default function App() {
     await updateDoc(doc(db, 'group_polls', poll.id), { votes1: v1, votes2: v2 });
   };
 
-  // হোমওয়ার্ক ও উপস্থিতি
   const handleAddHomework = async (e) => {
     e.preventDefault();
     if (!isTeacherOrHost || !hwTitle.trim()) return;
@@ -695,7 +776,6 @@ export default function App() {
     alert(`${attDate} তারিখের উপস্থিতি সেভ হয়েছে!`);
   };
 
-  // পরীক্ষা Edit ও রেকর্ডেড ক্লাস
   const handleSaveClassExam = async (e) => {
     e.preventDefault();
     if (!isTeacherOrHost || !examForm.title.trim()) return;
@@ -732,7 +812,6 @@ export default function App() {
     setClassForm({ title: '', videoUrl: '', notes: '' });
   };
 
-  // প্রোফাইল ছবি ও নাম Edit
   const handleProfilePhotoChange = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -755,7 +834,6 @@ export default function App() {
       setSavingProfile(false);
     }
   };
-  // AI Quiz ও Flashcards ফাংশন
   const handleGenerateQuiz = async () => {
     if (!examTopic.trim()) return;
     setLoadingQuiz(true);
@@ -783,9 +861,19 @@ export default function App() {
   const handleOptionSelect = (idx) => {
     if (selectedOption !== null) return;
     setSelectedOption(idx);
-    if (idx === quizQuestions[currentQIndex].correctIndex) {
+    const currentQ = quizQuestions[currentQIndex];
+    if (idx === currentQ.correctIndex) {
       setQuizScore((s) => s + 1);
       addXp(20);
+    } else {
+      setMistakes(prev => [{
+        id: Date.now(),
+        topic: examTopic,
+        question: currentQ.question,
+        yourAnswer: currentQ.options[idx],
+        correctAnswer: currentQ.options[currentQ.correctIndex],
+        explanation: currentQ.explanation
+      }, ...prev]);
     }
   };
 
@@ -820,6 +908,11 @@ export default function App() {
     ? allUsers
     : allUsers.filter(u => (activeGroupObj?.members || []).includes(u.uid));
 
+  // নিজের উপস্থিতির হার (%) হিসাব
+  const myTotalClasses = attendanceRecords.filter(rec => (rec.records || []).some(r => r.uid === user?.uid)).length;
+  const myPresentClasses = attendanceRecords.filter(rec => (rec.records || []).some(r => r.uid === user?.uid && r.status === 'উপস্থিত')).length;
+  const myAttendancePercent = myTotalClasses > 0 ? Math.round((myPresentClasses / myTotalClasses) * 100) : 100;
+
   const pinnedMessages = groupMsgs.filter(m => m.pinned);
   const formatTime = (sec) => `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
 
@@ -835,9 +928,8 @@ export default function App() {
 
   return (
     <div className={`min-h-screen flex flex-col font-sans transition-colors duration-300 ${bgMain}`}>
-      {/* টপ নেভিগেশন বার + পমোডোরো ফোকাস টাইমার */}
       <header className="sticky top-0 z-30 bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 text-white px-3 py-2.5 shadow-lg">
-        <div className="max-w-3xl mx-auto flex items-center justify-between gap-2">
+        <div className="max-w-3xl mx-auto flex items-center justify-between gap-1.5">
           <div className="flex items-center gap-2">
             <div className="bg-white/20 p-1.5 rounded-xl">
               <Sparkles className="w-5 h-5 text-amber-300" />
@@ -852,7 +944,18 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-1.5">
-            {/* মিনি পমোডোরো ফোকাস টাইমার */}
+            <button
+              onClick={handleEnableNotifications}
+              title={notifPermission === 'granted' ? 'নোটিফিকেশন চালু আছে' : 'নোটিফিকেশন চালু করুন'}
+              className={`p-1.5 rounded-full transition ${
+                notifPermission === 'granted'
+                  ? 'bg-emerald-400/25 text-emerald-200'
+                  : 'bg-amber-400 text-slate-950 animate-bounce'
+              }`}
+            >
+              {notifPermission === 'granted' ? <BellRing className="w-4 h-4" /> : <Bell className="w-4 h-4" />}
+            </button>
+
             <div className="flex items-center gap-1 bg-black/25 px-2 py-1 rounded-full text-[11px] font-mono">
               <Clock className="w-3 h-3 text-emerald-300" />
               <span>{formatTime(timerSeconds)}</span>
@@ -864,11 +967,6 @@ export default function App() {
               </button>
             </div>
 
-            <div className="hidden sm:flex items-center gap-1 bg-white/20 px-2.5 py-1 rounded-full text-xs font-bold">
-              <Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300" />
-              <span>{xp} XP</span>
-            </div>
-
             <button onClick={() => setDarkMode(!darkMode)} className="p-1.5 rounded-full bg-white/15">
               {darkMode ? <Sun className="w-4 h-4 text-amber-200" /> : <Moon className="w-4 h-4" />}
             </button>
@@ -876,19 +974,14 @@ export default function App() {
             {!authLoading && (
               user ? (
                 <div className="flex items-center gap-1 bg-white/15 pl-1 pr-2 py-1 rounded-full">
-                  <img
-                    src={userProfile?.photoURL || user.photoURL || 'https://via.placeholder.com/32'}
-                    alt="User"
-                    className="w-6 h-6 rounded-full object-cover"
-                  />
+                  <img src={userProfile?.photoURL || user.photoURL || 'https://via.placeholder.com/32'} alt="User" className="w-6 h-6 rounded-full object-cover" />
                   <button onClick={handleLogout} title="Sign Out" className="text-rose-200 hover:text-white">
                     <LogOut className="w-3.5 h-3.5" />
                   </button>
                 </div>
               ) : (
                 <button onClick={handleGoogleSignIn} className="bg-white text-indigo-700 px-2.5 py-1 rounded-full text-xs font-bold flex items-center gap-1">
-                  <LogIn className="w-3.5 h-3.5" />
-                  <span>Sign In</span>
+                  <LogIn className="w-3.5 h-3.5" /><span>Sign In</span>
                 </button>
               )
             )}
@@ -896,10 +989,7 @@ export default function App() {
         </div>
       </header>
 
-      {/* মূল কনটেন্ট */}
       <main className="flex-1 max-w-3xl w-full mx-auto p-3 pb-24 flex flex-col">
-
-        {/* ট্যাব ১: AI TUTOR (ছবি + ভয়েস ইনপুট + ভয়েস আউটপুট) */}
         {activeTab === 'tutor' && (
           <div className="flex-1 flex flex-col">
             <div className="flex items-center justify-between mb-2 px-1 gap-2">
@@ -907,11 +997,7 @@ export default function App() {
                 <Brain className="w-4 h-4" /> AI Tutor (Vision & Voice)
               </span>
               <div className="flex items-center gap-2">
-                <select
-                  value={tutorMode}
-                  onChange={(e) => setTutorMode(e.target.value)}
-                  className={`text-xs px-2 py-1.5 rounded-lg border outline-none font-medium ${cardBg}`}
-                >
+                <select value={tutorMode} onChange={(e) => setTutorMode(e.target.value)} className={`text-xs px-2 py-1.5 rounded-lg border outline-none font-medium ${cardBg}`}>
                   <option value="Friendly Tutor">Friendly Tutor</option>
                   <option value="Exam Coach">Exam Coach</option>
                   <option value="Step-by-Step Math">Step-by-Step Math</option>
@@ -925,24 +1011,13 @@ export default function App() {
             <div className={`flex-1 rounded-2xl border p-3 overflow-y-auto space-y-3 min-h-[55vh] max-h-[60vh] ${cardBg}`}>
               {messages.map((msg) => (
                 <div key={msg.id} className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
-                  <div
-                    className={`max-w-[86%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
-                      msg.sender === 'user'
-                        ? 'bg-indigo-600 text-white rounded-br-sm shadow-md'
-                        : darkMode
-                        ? 'bg-[#1e273d] text-slate-100 rounded-bl-sm border border-slate-700/60'
-                        : 'bg-slate-100 text-slate-800 rounded-bl-sm'
-                    }`}
-                  >
-                    {msg.image && (
-                      <img src={msg.image} alt="Uploaded" className="max-h-48 rounded-xl mb-2 border border-white/20" />
-                    )}
+                  <div className={`max-w-[86%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
+                    msg.sender === 'user' ? 'bg-indigo-600 text-white rounded-br-sm shadow-md' : darkMode ? 'bg-[#1e273d] text-slate-100 rounded-bl-sm border border-slate-700/60' : 'bg-slate-100 text-slate-800 rounded-bl-sm'
+                  }`}>
+                    {msg.image && <img src={msg.image} alt="Uploaded" className="max-h-48 rounded-xl mb-2 border border-white/20" />}
                     {msg.text}
                     {msg.sender === 'ai' && (
-                      <button
-                        onClick={() => handleSpeakText(msg.text)}
-                        className="mt-2 flex items-center gap-1 text-[11px] text-indigo-400 hover:text-indigo-300 font-semibold"
-                      >
+                      <button onClick={() => handleSpeakText(msg.text)} className="mt-2 flex items-center gap-1 text-[11px] text-indigo-400 hover:text-indigo-300 font-semibold">
                         <Volume2 className="w-3.5 h-3.5" /> উত্তরটি শুনুন
                       </button>
                     )}
@@ -952,8 +1027,7 @@ export default function App() {
               ))}
               {isTyping && (
                 <div className="flex items-center gap-2 text-xs text-indigo-400 px-2 py-1">
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  <span>AI বিশ্লেষণ করে শুদ্ধ বাংলায় উত্তর লিখছে...</span>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" /><span>AI বিশ্লেষণ করে শুদ্ধ বাংলায় উত্তর লিখছে...</span>
                 </div>
               )}
               <div ref={chatEndRef} />
@@ -972,53 +1046,28 @@ export default function App() {
                 <Camera className="w-5 h-5 text-indigo-400" />
                 <input type="file" accept="image/*" onChange={handleTutorImageUpload} className="hidden" />
               </label>
-              <button
-                type="button"
-                onClick={handleVoiceInput}
-                className={`p-3 rounded-xl border ${isListening ? 'bg-rose-600 text-white animate-pulse' : cardBg}`}
-                title="মুখে প্রশ্ন বলুন"
-              >
+              <button type="button" onClick={handleVoiceInput} className={`p-3 rounded-xl border ${isListening ? 'bg-rose-600 text-white animate-pulse' : cardBg}`} title="মুখে প্রশ্ন বলুন">
                 <Mic className="w-5 h-5 text-emerald-400" />
               </button>
-              <input
-                type="text"
-                value={inputMsg}
-                onChange={(e) => setInputMsg(e.target.value)}
-                placeholder="প্রশ্ন লিখুন, বলুন বা ছবি দিন..."
-                className={`flex-1 rounded-xl border px-3 py-3 text-sm outline-none focus:border-indigo-500 ${inputBg}`}
-              />
-              <button
-                type="submit"
-                disabled={isTyping || (!inputMsg.trim() && !tutorImage)}
-                className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white p-3 rounded-xl shadow-lg"
-              >
+              <input type="text" value={inputMsg} onChange={(e) => setInputMsg(e.target.value)} placeholder="প্রশ্ন লিখুন, বলুন বা ছবি দিন..." className={`flex-1 rounded-xl border px-3 py-3 text-sm outline-none focus:border-indigo-500 ${inputBg}`} />
+              <button type="submit" disabled={isTyping || (!inputMsg.trim() && !tutorImage)} className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white p-3 rounded-xl shadow-lg">
                 <Send className="w-5 h-5" />
               </button>
             </form>
           </div>
         )}
-        {/* ট্যাব ২: CLASSROOM GROUPS */}
         {activeTab === 'classroom' && (
           <div className="space-y-3">
             <div className={`p-3 rounded-2xl border space-y-2.5 ${cardBg}`}>
               <div className="flex items-center justify-between gap-2">
-                <select
-                  value={selectedGroupId}
-                  onChange={(e) => setSelectedGroupId(e.target.value)}
-                  className={`flex-1 text-xs font-bold px-3 py-2 rounded-xl border outline-none ${inputBg}`}
-                >
+                <select value={selectedGroupId} onChange={(e) => setSelectedGroupId(e.target.value)} className={`flex-1 text-xs font-bold px-3 py-2 rounded-xl border outline-none ${inputBg}`}>
                   <option value="global">🌐 কমন স্টুডেন্ট কমিউনিটি (সবার জন্য)</option>
                   {myAccessibleGroups.map(g => (
-                    <option key={g.id} value={g.id}>
-                      📚 {g.name} ({g.teacherName}) — কোড: {g.inviteCode}
-                    </option>
+                    <option key={g.id} value={g.id}>📚 {g.name} ({g.teacherName}) — কোড: {g.inviteCode}</option>
                   ))}
                 </select>
                 {currentRole === 'student' && !userProfile?.teacherRequest && user && (
-                  <button
-                    onClick={handleRequestTeacher}
-                    className="bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2.5 py-2 rounded-xl text-[11px] font-bold shrink-0"
-                  >
+                  <button onClick={handleRequestTeacher} className="bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2.5 py-2 rounded-xl text-[11px] font-bold shrink-0">
                     Teacher আবেদন
                   </button>
                 )}
@@ -1026,21 +1075,12 @@ export default function App() {
 
               {user && (
                 <form onSubmit={handleJoinGroupByCode} className="flex gap-2">
-                  <input
-                    type="text"
-                    value={joinCodeInput}
-                    onChange={(e) => setJoinCodeInput(e.target.value)}
-                    placeholder="টিচারের গ্রুপ কোড দিয়ে জয়েন করুন..."
-                    className={`flex-1 rounded-xl border px-3 py-1.5 text-xs outline-none ${inputBg}`}
-                  />
-                  <button type="submit" className="bg-indigo-600 text-white px-3 py-1.5 rounded-xl text-xs font-bold">
-                    Join
-                  </button>
+                  <input type="text" value={joinCodeInput} onChange={(e) => setJoinCodeInput(e.target.value)} placeholder="টিচারের গ্রুপ কোড দিয়ে জয়েন করুন..." className={`flex-1 rounded-xl border px-3 py-1.5 text-xs outline-none ${inputBg}`} />
+                  <button type="submit" className="bg-indigo-600 text-white px-3 py-1.5 rounded-xl text-xs font-bold">Join</button>
                 </form>
               )}
 
-              {/* সাব-ট্যাব মেনু */}
-              <div className="flex gap-1.5 overflow-x-auto pb-1">
+              <div className="flex flex-wrap gap-1.5 pt-1">
                 {[
                   { id: 'chat', label: 'চ্যাট', icon: MessageSquare },
                   { id: 'notices', label: `নোটিশ ও পোল (${notices.length + polls.length})`, icon: Bell },
@@ -1048,38 +1088,38 @@ export default function App() {
                   { id: 'attendance', label: 'উপস্থিতি', icon: ClipboardCheck },
                   { id: 'exams', label: 'পরীক্ষা ও রেজাল্ট', icon: Award },
                   { id: 'classes', label: 'রেকর্ডেড ক্লাস', icon: Video },
+                  { id: 'leaderboard', label: 'লিডারবোর্ড', icon: Medal },
                   ...(isTeacherOrHost ? [{ id: 'manage', label: isHost ? 'Host কন্ট্রোল' : 'গ্রুপ তৈরি', icon: Shield }] : [])
                 ].map(st => {
                   const Icon = st.icon;
                   return (
                     <button
                       key={st.id}
-                      onClick={() => setGroupSubTab(st.id)}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 shrink-0 transition ${
+                      onClick={() => {
+                        setGroupSubTab(st.id);
+                        if (st.id === 'notices') setUnreadNoticeCount(0);
+                      }}
+                      className={`px-2.5 py-1.5 rounded-xl text-[11px] font-semibold flex items-center gap-1 transition ${
                         groupSubTab === st.id ? 'bg-indigo-600 text-white' : 'bg-slate-800/40 text-slate-400'
                       }`}
                     >
-                      <Icon className="w-3.5 h-3.5" />
-                      <span>{st.label}</span>
+                      <Icon className="w-3.5 h-3.5" /><span>{st.label}</span>
                     </button>
                   );
                 })}
               </div>
             </div>
 
-            {/* সাব-ট্যাব: গ্রুপ চ্যাট (Pin মেসেজ + ছবি + Like) */}
             {groupSubTab === 'chat' && (
               <div className="flex flex-col">
                 {pinnedMessages.length > 0 && (
                   <div className="mb-2 p-2.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-xs flex items-center gap-2">
                     <Pin className="w-4 h-4 text-amber-400 shrink-0" />
-                    <span className="truncate flex-1 font-medium text-amber-200">
-                      পিন করা: {pinnedMessages[pinnedMessages.length - 1].text}
-                    </span>
+                    <span className="truncate flex-1 font-medium text-amber-200">পিন করা: {pinnedMessages[pinnedMessages.length - 1].text}</span>
                   </div>
                 )}
 
-                <div className={`rounded-2xl border p-3 overflow-y-auto space-y-3 min-h-[45vh] max-h-[48vh] ${cardBg}`}>
+                <div className={`rounded-2xl border p-3 overflow-y-auto space-y-3 min-h-[44vh] max-h-[47vh] ${cardBg}`}>
                   {groupMsgs.length === 0 ? (
                     <p className="text-center text-xs text-slate-400 py-14">এই গ্রুপে এখনো কোনো মেসেজ নেই।</p>
                   ) : (
@@ -1094,12 +1134,8 @@ export default function App() {
                             {m.senderRole === 'teacher' && <span className="text-[9px] bg-emerald-400 text-black px-1.5 rounded font-bold">TEACHER</span>}
                             {isTeacherOrHost && (
                               <>
-                                <button onClick={() => handleTogglePinMsg(m)} className="text-amber-400 ml-1" title="Pin/Unpin">
-                                  <Pin className="w-3 h-3" />
-                                </button>
-                                <button onClick={() => deleteDoc(doc(db, 'group_messages', m.id))} className="text-rose-400">
-                                  <Trash2 className="w-3 h-3" />
-                                </button>
+                                <button onClick={() => handleTogglePinMsg(m)} className="text-amber-400 ml-1"><Pin className="w-3 h-3" /></button>
+                                <button onClick={() => deleteDoc(doc(db, 'group_messages', m.id))} className="text-rose-400"><Trash2 className="w-3 h-3" /></button>
                               </>
                             )}
                           </div>
@@ -1111,9 +1147,7 @@ export default function App() {
                           </div>
                           <div className="flex items-center gap-2 mt-0.5 px-1">
                             <span className="text-[10px] text-slate-400">{m.timeStr}</span>
-                            <button onClick={() => handleLikeMsg(m)} className="text-[11px] text-slate-400 hover:text-amber-400">
-                              👍 {(m.likes || []).length}
-                            </button>
+                            <button onClick={() => handleLikeMsg(m)} className="text-[11px] text-slate-400 hover:text-amber-400">👍 {(m.likes || []).length}</button>
                           </div>
                         </div>
                       );
@@ -1135,42 +1169,35 @@ export default function App() {
                     <ImageIcon className="w-5 h-5 text-emerald-400" />
                     <input type="file" accept="image/*" onChange={handleCommImageSelect} className="hidden" />
                   </label>
-                  <input
-                    type="text"
-                    value={commInput}
-                    onChange={(e) => setCommInput(e.target.value)}
-                    placeholder={user ? "গ্রুপে মেসেজ বা নোট লিখুন..." : "চ্যাট করতে Sign In করুন"}
-                    className={`flex-1 rounded-xl border px-3.5 py-3 text-sm outline-none ${inputBg}`}
-                  />
-                  <button type="submit" disabled={sendingComm} className="bg-emerald-600 text-white p-3 rounded-xl">
-                    <Send className="w-5 h-5" />
-                  </button>
+                  <input type="text" value={commInput} onChange={(e) => setCommInput(e.target.value)} placeholder={user ? "গ্রুপে মেসেজ বা নোট লিখুন..." : "চ্যাট করতে Sign In করুন"} className={`flex-1 rounded-xl border px-3.5 py-3 text-sm outline-none ${inputBg}`} />
+                  <button type="submit" disabled={sendingComm} className="bg-emerald-600 text-white p-3 rounded-xl"><Send className="w-5 h-5" /></button>
                 </form>
               </div>
             )}
 
-            {/* সাব-ট্যাব: নোটিফিকেশন ও লাইভ পোল (কেবল Host এবং Teacher দিতে পারবে) */}
             {groupSubTab === 'notices' && (
               <div className="space-y-3">
+                {notifPermission !== 'granted' && (
+                  <button onClick={handleEnableNotifications} className="w-full p-3 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-200 text-xs font-bold flex items-center justify-center gap-2">
+                    <BellRing className="w-4 h-4" /> ফোনের নোটিফিকেশন অ্যালার্ট চালু করতে এখানে ট্যাপ করুন
+                  </button>
+                )}
+
                 {isTeacherOrHost ? (
                   <>
                     <form onSubmit={handlePostNotice} className={`p-4 rounded-2xl border space-y-2 ${cardBg}`}>
-                      <h3 className="text-sm font-bold text-amber-400 flex items-center gap-1.5">
-                        <Bell className="w-4 h-4" /> নোটিফিকেশন প্রকাশ করুন (Host/Teacher)
-                      </h3>
+                      <h3 className="text-sm font-bold text-amber-400 flex items-center gap-1.5"><Bell className="w-4 h-4" /> নোটিফিকেশন প্রকাশ করুন (Host/Teacher)</h3>
                       <input type="text" value={noticeTitle} onChange={(e) => setNoticeTitle(e.target.value)} placeholder="নোটিশের শিরোনাম" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
                       <textarea rows="2" value={noticeBody} onChange={(e) => setNoticeBody(e.target.value)} placeholder="বিস্তারিত নোটিশ..." className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
                       <button type="submit" className="bg-amber-500 text-slate-950 font-bold text-xs px-4 py-2 rounded-xl">নোটিশ পাঠান</button>
                     </form>
 
                     <form onSubmit={handleCreatePoll} className={`p-4 rounded-2xl border space-y-2 ${cardBg}`}>
-                      <h3 className="text-sm font-bold text-indigo-400 flex items-center gap-1.5">
-                        <BarChart2 className="w-4 h-4" /> নতুন লাইভ পোল তৈরি করুন
-                      </h3>
-                      <input type="text" value={pollQuestion} onChange={(e) => setPollQuestion(e.target.value)} placeholder="প্রশ্ন (যেমন: আগামীকাল কি এক্সট্রা ক্লাস হবে?)" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
+                      <h3 className="text-sm font-bold text-indigo-400 flex items-center gap-1.5"><BarChart2 className="w-4 h-4" /> নতুন লাইভ পোল তৈরি করুন</h3>
+                      <input type="text" value={pollQuestion} onChange={(e) => setPollQuestion(e.target.value)} placeholder="প্রশ্ন" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
                       <div className="grid grid-cols-2 gap-2">
-                        <input type="text" value={pollOpt1} onChange={(e) => setPollOpt1(e.target.value)} placeholder="অপশন ১ (যেমন: হ্যাঁ)" className={`rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
-                        <input type="text" value={pollOpt2} onChange={(e) => setPollOpt2(e.target.value)} placeholder="অপশন ২ (যেমন: না)" className={`rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
+                        <input type="text" value={pollOpt1} onChange={(e) => setPollOpt1(e.target.value)} placeholder="অপশন ১" className={`rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
+                        <input type="text" value={pollOpt2} onChange={(e) => setPollOpt2(e.target.value)} placeholder="অপশন ২" className={`rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
                       </div>
                       <button type="submit" className="bg-indigo-600 text-white font-bold text-xs px-4 py-2 rounded-xl">পোল প্রকাশ করুন</button>
                     </form>
@@ -1211,14 +1238,13 @@ export default function App() {
               </div>
             )}
 
-            {/* সাব-ট্যাব: হোমওয়ার্ক ও অ্যাসাইনমেন্ট ট্র্যাকার */}
             {groupSubTab === 'homework' && (
               <div className="space-y-3">
                 {isTeacherOrHost && (
                   <form onSubmit={handleAddHomework} className={`p-4 rounded-2xl border space-y-2 ${cardBg}`}>
                     <h3 className="text-sm font-bold text-emerald-400">নতুন হোমওয়ার্ক দিন</h3>
-                    <input type="text" value={hwTitle} onChange={(e) => setHwTitle(e.target.value)} placeholder="হোমওয়ার্কের বিবরণ (যেমন: অনুশীলনী ৩.১ এর ১-১০ নং অঙ্ক)" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
-                    <input type="text" value={hwDue} onChange={(e) => setHwDue(e.target.value)} placeholder="জমা দেওয়ার শেষ তারিখ (যেমন: আগামী সোমবার)" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
+                    <input type="text" value={hwTitle} onChange={(e) => setHwTitle(e.target.value)} placeholder="হোমওয়ার্কের বিবরণ" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
+                    <input type="text" value={hwDue} onChange={(e) => setHwDue(e.target.value)} placeholder="জমা দেওয়ার শেষ তারিখ" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
                     <button type="submit" className="bg-emerald-600 text-white font-bold text-xs px-4 py-2 rounded-xl">হোমওয়ার্ক প্রকাশ করুন</button>
                   </form>
                 )}
@@ -1235,10 +1261,7 @@ export default function App() {
                         {isTeacherOrHost && <button onClick={() => deleteDoc(doc(db, 'group_homeworks', hw.id))} className="text-rose-400"><Trash2 className="w-4 h-4" /></button>}
                       </div>
                       <div className="flex items-center justify-between pt-1">
-                        <button
-                          onClick={() => handleToggleHomeworkDone(hw)}
-                          className={`px-3 py-1.5 rounded-xl text-xs font-bold ${isDone ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-200'}`}
-                        >
+                        <button onClick={() => handleToggleHomeworkDone(hw)} className={`px-3 py-1.5 rounded-xl text-xs font-bold ${isDone ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-200'}`}>
                           {isDone ? '✅ সম্পন্ন হয়েছে' : 'জমা দিন (Mark Done)'}
                         </button>
                         <span className="text-[11px] text-slate-400">জমা দিয়েছে: {(hw.completedBy || []).length} জন</span>
@@ -1249,7 +1272,6 @@ export default function App() {
               </div>
             )}
 
-            {/* সাব-ট্যাব: উপস্থিতি ও অনুপস্থিতি */}
             {groupSubTab === 'attendance' && (
               <div className="space-y-3">
                 {isTeacherOrHost && (
@@ -1275,8 +1297,23 @@ export default function App() {
 
                 {attendanceRecords.map(rec => (
                   <div key={rec.id} className={`p-3.5 rounded-2xl border space-y-2 ${cardBg}`}>
-                    <div className="flex justify-between text-xs font-bold text-indigo-400">
-                      <span>তারিখ: {rec.date}</span><span>শিক্ষক: {rec.takenBy}</span>
+                    <div className="flex justify-between items-center text-xs font-bold text-indigo-400">
+                      <span>তারিখ: {rec.date}</span>
+                      <div className="flex items-center gap-2">
+                        <span>শিক্ষক: {rec.takenBy}</span>
+                        {isTeacherOrHost && (
+                          <button
+                            onClick={() => {
+                              if (window.confirm(`${rec.date} তারিখের উপস্থিতি মুছে ফেলতে চান?`)) {
+                                deleteDoc(doc(db, 'group_attendance', rec.id));
+                              }
+                            }}
+                            className="text-rose-400 hover:text-rose-300"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </div>
                     <div className="flex flex-wrap gap-1.5">
                       {(rec.records || []).map((r, i) => (
@@ -1289,8 +1326,6 @@ export default function App() {
                 ))}
               </div>
             )}
-
-            {/* সাব-ট্যাব: পরীক্ষার তথ্য ও রেজাল্ট (কেবল Host ও Teacher Edit করতে পারবে) */}
             {groupSubTab === 'exams' && (
               <div className="space-y-3">
                 {isTeacherOrHost ? (
@@ -1301,7 +1336,7 @@ export default function App() {
                       <input type="date" value={examForm.date} onChange={(e) => setExamForm({ ...examForm, date: e.target.value })} className={`rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
                     </div>
                     <input type="text" value={examForm.syllabus} onChange={(e) => setExamForm({ ...examForm, syllabus: e.target.value })} placeholder="সিলেবাস ও পূর্ণমান" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
-                                <textarea rows="3" value={examForm.resultsText} onChange={(e) => setExamForm({ ...examForm, resultsText: e.target.value })} placeholder="শিক্ষার্থীদের প্রাপ্ত নম্বর / ফলাফল লিখুন..." className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
+                    <textarea rows="3" value={examForm.resultsText} onChange={(e) => setExamForm({ ...examForm, resultsText: e.target.value })} placeholder="শিক্ষার্থীদের প্রাপ্ত নম্বর / ফলাফল লিখুন..." className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
                     <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-xs font-bold">{editingExamId ? 'আপডেট সেভ করুন' : 'পরীক্ষার তথ্য প্রকাশ করুন'}</button>
                   </form>
                 ) : (
@@ -1334,7 +1369,6 @@ export default function App() {
               </div>
             )}
 
-            {/* সাব-ট্যাব: রেকর্ডেড ক্লাস */}
             {groupSubTab === 'classes' && (
               <div className="space-y-3">
                 {isTeacherOrHost && (
@@ -1365,7 +1399,25 @@ export default function App() {
               </div>
             )}
 
-            {/* সাব-ট্যাব: Teacher গ্রুপ তৈরি ও Host কন্ট্রোল */}
+            {groupSubTab === 'leaderboard' && (
+              <div className={`p-4 rounded-2xl border space-y-2.5 ${cardBg}`}>
+                <h3 className="text-sm font-bold text-amber-400 flex items-center gap-1.5"><Medal className="w-4 h-4" /> টপ লার্নার্স লিডারবোর্ড (XP র‍্যাংকিং)</h3>
+                {[...groupMembers].sort((a, b) => (b.xp || 0) - (a.xp || 0)).map((member, index) => (
+                  <div key={member.uid} className="flex items-center justify-between p-2.5 rounded-xl bg-slate-800/40 text-xs">
+                    <div className="flex items-center gap-2.5">
+                      <span className={`w-6 h-6 rounded-full flex items-center justify-center font-extrabold ${
+                        index === 0 ? 'bg-amber-400 text-black' : index === 1 ? 'bg-slate-300 text-black' : index === 2 ? 'bg-amber-700 text-white' : 'bg-slate-700 text-slate-300'
+                      }`}>
+                        {index + 1}
+                      </span>
+                      <span className="font-bold">{member.displayName}</span>
+                    </div>
+                    <span className="font-bold text-amber-300">{member.xp || 150} XP</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {groupSubTab === 'manage' && isTeacherOrHost && (
               <div className="space-y-4">
                 <form onSubmit={handleCreateGroup} className={`p-4 rounded-2xl border space-y-2.5 ${cardBg}`}>
@@ -1414,7 +1466,6 @@ export default function App() {
           </div>
         )}
 
-        {/* ট্যাব ৩: AI PRACTICE QUIZ */}
         {activeTab === 'exam' && (
           <div className="space-y-4">
             <div className={`p-4 rounded-2xl border ${cardBg}`}>
@@ -1472,7 +1523,6 @@ export default function App() {
           </div>
         )}
 
-        {/* ট্যাব ৪: AI FLASHCARDS */}
         {activeTab === 'flashcards' && (
           <div className="space-y-4">
             <div className={`p-4 rounded-2xl border ${cardBg}`}>
@@ -1484,7 +1534,7 @@ export default function App() {
             </div>
             {flashcards.length > 0 && (
               <div className="space-y-3">
-                <div onClick={() => setIsFlipped(!isFlipped)} className={`min-h-[200px] p-6 rounded-2xl border-2 cursor-pointer flex flex-col items-center justify-center text-center ${isFlipped ? 'border-violet-500 bg-violet-600/15' : cardBg}`}>
+                <div onClick={() => setIsFlipped(!isFlipped)} className={`min-h-[180px] p-6 rounded-2xl border-2 cursor-pointer flex flex-col items-center justify-center text-center ${isFlipped ? 'border-violet-500 bg-violet-600/15' : cardBg}`}>
                   <span className="text-[11px] font-bold text-violet-400 mb-2">{isFlipped ? 'উত্তর' : `কার্ড ${cardIndex + 1} / ${flashcards.length} (ট্যাপ করুন)`}</span>
                   <p className="text-base font-semibold">{cleanAiOutput(isFlipped ? flashcards[cardIndex].back : flashcards[cardIndex].front)}</p>
                 </div>
@@ -1494,15 +1544,31 @@ export default function App() {
                 </div>
               </div>
             )}
+
+            {/* AI শর্ট নোট জেনারেটর */}
+            <div className={`p-4 rounded-2xl border space-y-3 ${cardBg}`}>
+              <h2 className="font-bold text-base flex items-center gap-2"><BookOpen className="w-5 h-5 text-emerald-400" /> AI Short Notes জেনারেটর</h2>
+              <div className="flex gap-2">
+                <input type="text" value={noteTopic} onChange={(e) => setNoteTopic(e.target.value)} placeholder="যেকোনো অধ্যায় লিখুন (যেমন: আলোর প্রতিফলন)" className={`flex-1 rounded-xl border px-3 py-2 text-xs outline-none ${inputBg}`} />
+                <button onClick={handleGenerateNotes} disabled={loadingNote} className="bg-emerald-600 text-white px-4 py-2 rounded-xl text-xs font-bold">{loadingNote ? '...' : 'নোট তৈরি'}</button>
+              </div>
+              {generatedNote && (
+                <div className="p-3 rounded-xl bg-slate-800/40 text-xs whitespace-pre-wrap space-y-2">
+                  <p>{generatedNote}</p>
+                  <button onClick={() => { navigator.clipboard.writeText(generatedNote); alert("নোট কপি হয়েছে!"); }} className="inline-flex items-center gap-1 text-emerald-400 font-bold">
+                    <Copy className="w-3.5 h-3.5" /> নোট কপি করুন
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
-        {/* ট্যাব ৫: MY ID & PROFILE EDIT */}
         {activeTab === 'profile' && (
           <div className="space-y-4">
             <div className="grid grid-cols-3 gap-2.5">
               <div className={`p-3 rounded-2xl border text-center ${cardBg}`}><Trophy className="w-5 h-5 text-amber-400 mx-auto mb-1" /><div className="text-base font-bold">{xp}</div><div className="text-[10px] text-slate-400">মোট XP</div></div>
-              <div className={`p-3 rounded-2xl border text-center ${cardBg}`}><Flame className="w-5 h-5 text-orange-400 mx-auto mb-1" /><div className="text-base font-bold">{streak} দিন</div><div className="text-[10px] text-slate-400">স্ট্রিক</div></div>
+              <div className={`p-3 rounded-2xl border text-center ${cardBg}`}><ClipboardCheck className="w-5 h-5 text-emerald-400 mx-auto mb-1" /><div className="text-base font-bold">{myAttendancePercent}%</div><div className="text-[10px] text-slate-400">উপস্থিতি হার</div></div>
               <div className={`p-3 rounded-2xl border text-center ${cardBg}`}><Shield className="w-5 h-5 text-indigo-400 mx-auto mb-1" /><div className="text-sm font-bold uppercase">{currentRole}</div><div className="text-[10px] text-slate-400">বর্তমান মোড</div></div>
             </div>
 
@@ -1518,7 +1584,7 @@ export default function App() {
                 </div>
                 <input type="text" value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="আপনার নাম" className={`w-full rounded-xl border px-3 py-2 text-sm ${inputBg}`} />
                 <input type="text" value={editBio} onChange={(e) => setEditBio(e.target.value)} placeholder="পরিচিতি / শ্রেণি (Bio)" className={`w-full rounded-xl border px-3 py-2 text-sm ${inputBg}`} />
-                <button type="submit" disabled={savingProfile} className="w-full bg-indigo-600 text-white py-2.5 rounded-xl text-sm font-bold">{savingProfile ? 'সেভ হচ্ছে...' : 'প্রোফাইল সেভ করুন'}</button>
+                                <button type="submit" disabled={savingProfile} className="w-full bg-indigo-600 text-white py-2.5 rounded-xl text-sm font-bold">{savingProfile ? 'সেভ হচ্ছে...' : 'প্রোফাইল সেভ করুন'}</button>
               </form>
             ) : (
               <div className={`p-6 rounded-2xl border text-center space-y-3 ${cardBg}`}>
@@ -1526,25 +1592,54 @@ export default function App() {
                 <button onClick={handleGoogleSignIn} className="bg-indigo-600 text-white px-5 py-2.5 rounded-xl text-sm font-bold">Google Sign In</button>
               </div>
             )}
+
+            {/* ভুল প্রশ্নের খাতা (Mistake Log) */}
+            {mistakes.length > 0 && (
+              <div className={`p-4 rounded-2xl border space-y-2.5 ${cardBg}`}>
+                <h3 className="text-sm font-bold text-rose-400 flex items-center gap-1.5"><AlertTriangle className="w-4 h-4" /> ভুল প্রশ্নের খাতা ({mistakes.length}টি)</h3>
+                {mistakes.map(m => (
+                  <div key={m.id} className="p-3 rounded-xl bg-slate-800/40 text-xs space-y-1">
+                    <p className="font-bold">{m.question}</p>
+                    <p className="text-rose-400">আপনার উত্তর: {m.yourAnswer}</p>
+                    <p className="text-emerald-400">সঠিক উত্তর: {m.correctAnswer}</p>
+                    {m.explanation && <p className="text-slate-300 pt-1">{cleanAiOutput(m.explanation)}</p>}
+                    <button onClick={() => handleExplainMistake(m)} className="text-indigo-400 font-bold pt-1">
+                      {explainingMistakeId === m.id ? 'AI বুঝিয়ে লিখছে...' : '✨ AI দিয়ে আরও সহজে বুঝুন'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </main>
 
-      {/* বটম নেভিগেশন বার */}
       <nav className={`fixed bottom-0 inset-x-0 z-30 border-t backdrop-blur-md ${darkMode ? 'bg-[#0f1524]/95 border-slate-800' : 'bg-white/95 border-slate-200'}`}>
         <div className="max-w-3xl mx-auto grid grid-cols-5 py-1.5">
           {[
             { id: 'tutor', label: 'AI Tutor', icon: Brain },
-            { id: 'classroom', label: 'Classroom', icon: Users },
+            { id: 'classroom', label: 'Classroom', icon: Users, badge: unreadNoticeCount },
             { id: 'exam', label: 'AI Quiz', icon: HelpCircle },
-            { id: 'flashcards', label: 'Cards', icon: Layers },
+            { id: 'flashcards', label: 'Notes & Cards', icon: Layers },
             { id: 'profile', label: 'My ID', icon: Edit3 }
           ].map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
             return (
-              <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex flex-col items-center justify-center py-1.5 text-[11px] font-medium ${isActive ? 'text-indigo-400 font-bold' : 'text-slate-400'}`}>
+              <button
+                key={tab.id}
+                onClick={() => {
+                  setActiveTab(tab.id);
+                  if (tab.id === 'classroom') setUnreadNoticeCount(0);
+                }}
+                className={`relative flex flex-col items-center justify-center py-1.5 text-[11px] font-medium ${isActive ? 'text-indigo-400 font-bold' : 'text-slate-400'}`}
+              >
                 <Icon className={`w-5 h-5 mb-0.5 ${isActive ? 'text-indigo-400' : ''}`} />
+                {tab.badge > 0 && (
+                  <span className="absolute top-1 right-5 bg-rose-500 text-white text-[9px] font-extrabold w-4 h-4 rounded-full flex items-center justify-center">
+                    {tab.badge}
+                  </span>
+                )}
                 <span>{tab.label}</span>
               </button>
             );
