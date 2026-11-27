@@ -134,7 +134,7 @@ const callGeminiFast = async (prompt, systemInstruction = "", base64Image = null
     throw new Error("API Key পাওয়া যায়নি। Vercel Environment Variables চেক করুন।");
   }
 
-  const models = ["gemini-3.8-flash", "gemini-2.5-flash"];
+  const models = ["gemini-3.8-flash", "gemini-3.5-flash-lite"];
   const strictRules = isJson
     ? systemInstruction
     : `${systemInstruction} গুরুত্বপূর্ণ নিয়ম: কোনো উত্তরে Markdown (**, ###) বা LaTeX ($, $$) চিহ্ন ব্যবহার করবে না। গণিতের সূত্র সাধারণ টেক্সট ও ইউনিকোড চিহ্নে (যেমন: a² - b², ×, ÷, √) লিখবে। বাংলা শব্দের বানান শতভাগ শুদ্ধ রাখবে, বাংলার ভেতর ইংরেজি অক্ষর মেশাবে না।`;
