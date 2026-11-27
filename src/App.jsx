@@ -15,10 +15,10 @@ const callGeminiWithFallback = async (prompt, systemInstruction = "") => {
 
   // প্রাইমারি এবং ব্যাকআপ মডেল তালিকা
   const models = [
-    "gemini-3.8-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash"
-  ];
+  "gemini-2.5-flash-lite",
+  "gemini-2.0-flash",
+  "gemini-3.8-flash"
+];
 
   let lastError = "";
 
