@@ -95,28 +95,12 @@ export default function App() {
   const chatEndRef = useRef(null);
 
   // ২. Community Chat (অ্যাপের ব্যবহারকারীদের চ্যাট বক্স)
-  const [communityMsgs, setCommunityMsgs] = useState(() => {
+    const [communityMsgs, setCommunityMsgs] = useState(() => {
     const savedComm = localStorage.getItem('edunexus_community_chat');
-    return savedComm ? JSON.parse(savedComm) : [
-      {
-        id: 101,
-        user: 'আরিয়ান (দশম শ্রেণি)',
-        text: 'কেউ কি ত্রিকোণমিতির মান নির্ণয়ের সহজ শর্টকাট জানো?',
-        time: '10:30 AM',
-        isMe: false
-      },
-      {
-        id: 102,
-        user: 'তানিয়া',
-        text: 'হ্যাঁ! হাতের আঙুলের নিয়ম (0°, 30°, 45°, 60°, 90°) ব্যবহার করলে একদম ভুল হয় না। AI Tutor-কে জিজ্ঞাসা করলে সুন্দর চার্ট বানিয়ে দেয়।',
-        time: '10:34 AM',
-        isMe: false
-      }
-    ];
+    return savedComm ? JSON.parse(savedComm) : [];
   });
   const [commInput, setCommInput] = useState('');
   const commEndRef = useRef(null);
-
   // ৩. Exam Simulator স্টেট
   const [examTopic, setExamTopic] = useState('');
   const [quizQuestions, setQuizQuestions] = useState([]);
