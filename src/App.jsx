@@ -823,3 +823,373 @@ export default function App() {
       notify('Failed to save note', 'error');
     }
   };
+  const handleSendMessage = async (e) => {
+    e?.preventDefault();
+    if (!chatInput.trim() || isGenerating) return;
+    const promptText = chatInput.trim();
+    setChatInput('');
+    const newMsgs = [...messages, { role: 'user', text: promptText, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }];
+    setMessages(newMsgs);
+    setIsGenerating(true);
+
+    try {
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY || '';
+      const personaPrompt = selectedPersona === 'Socratic Mentor'
+        ? 'You are a Socratic Mentor. Guide the student with thought-provoking questions rather than giving direct answers immediately.'
+        : selectedPersona === 'Strict Examiner'
+        ? 'You are a Strict Examiner. Be concise, rigorous, point out flaws, and test deep understanding.'
+        : 'You are EduNexus AI, a friendly, clear, and encouraging personal study tutor.';
+
+      if (!apiKey) {
+        await new Promise((r) => setTimeout(r, 800));
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'ai',
+            text: `(${selectedPersona}) Demo Mode: Add VITE_GEMINI_API_KEY in Vercel Environment Variables to activate live Gemini AI responses.\n\nRegarding "${promptText}": Break this concept into core definitions, key formulas, and one practical example to master it!`,
+            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          }
+        ]);
+      } else {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: `${personaPrompt}\n\nStudent Question: ${promptText}` }] }]
+          })
+        });
+        const data = await res.json();
+        const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || 'Could not generate a response. Please check your API key.';
+        setMessages((prev) => [
+          ...prev,
+          { role: 'ai', text: reply, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
+        ]);
+      }
+      addXP(10, 'AI Tutor Session');
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        { role: 'ai', text: 'Network error while contacting Gemini AI. Please try again.', time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
+      ]);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handleGenerateQuiz = async () => {
+    if (!examTopic.trim() || isGeneratingExam) return;
+    setIsGeneratingExam(true);
+    setExamSubmitted(false);
+    setExamAnswers({});
+    try {
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY || '';
+      if (!apiKey) {
+        await new Promise((r) => setTimeout(r, 700));
+        setExamQuestions([
+          {
+            q: `What is the fundamental principle behind ${examTopic}?`,
+            options: ['Conservation & Equilibrium', 'Random Dispersion', 'Linear Decay', 'Static Isolation'],
+            answer: 0
+          },
+          {
+            q: `Which approach best solves complex problems in ${examTopic}?`,
+            options: ['Guesswork', 'Step-by-step analytical breakdown', 'Skipping edge cases', 'Memorizing without context'],
+            answer: 1
+          },
+          {
+            q: `How should you verify your result in ${examTopic}?`,
+            options: ['Check boundary conditions & units', 'Assume it is right', 'Ignore anomalies', 'Restart completely'],
+            answer: 0
+          }
+        ]);
+      } else {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{
+              parts: [{
+                text: `Generate 3 multiple-choice questions on "${examTopic}" (Difficulty: ${examDifficulty}). Return ONLY valid JSON array: [{"q":"question","options":["A","B","C","D"],"answer":0}] where answer is index 0-3.`
+              }]
+            }]
+          })
+        });
+        const data = await res.json();
+        const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+        const cleaned = raw.replace(/```json|```/g, '').trim();
+        const parsed = JSON.parse(cleaned);
+        if (Array.isArray(parsed) && parsed.length > 0) setExamQuestions(parsed);
+      }
+    } catch (e) {
+      notify('Could not parse quiz. Try another topic.', 'error');
+    } finally {
+      setIsGeneratingExam(false);
+    }
+  };
+
+  const handleSendGlobalChat = async (e) => {
+    e?.preventDefault();
+    if (!globalInput.trim() || !user) return;
+    const text = globalInput.trim();
+    setGlobalInput('');
+    try {
+      await addDoc(collection(db, 'global_chat'), {
+        text,
+        uid: user.uid,
+        name: user.displayName || profile?.name || 'Scholar',
+        createdAt: Date.now()
+      });
+      addXP(5, 'Community Chat');
+    } catch (err) {
+      notify('Unable to post message (check Firebase config)', 'error');
+    }
+  };
+  return (
+    <div className={`min-h-screen flex flex-col ${darkMode ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'} transition-colors`}>
+      {/* Top Navbar */}
+      <header className="sticky top-0 z-30 backdrop-blur-md bg-indigo-600/95 text-white px-4 py-3 shadow-md flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Sparkles className="w-6 h-6 text-amber-300" />
+          <span className="font-bold text-lg tracking-tight">EduNexus AI</span>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-xs font-semibold bg-white/20 px-2.5 py-1 rounded-full">
+            ⚡ {profile?.xp || 0} XP
+          </span>
+          <button
+            onClick={() => setDarkMode(!darkMode)}
+            className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20"
+            title="Toggle Theme"
+          >
+            {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+          </button>
+          {user && !user.isAnonymous ? (
+            <button onClick={() => signOut(auth)} className="text-xs bg-rose-500 hover:bg-rose-600 px-2.5 py-1 rounded-lg font-medium">
+              Logout
+            </button>
+          ) : (
+            <button
+              onClick={() => signInWithPopup(auth, new GoogleAuthProvider()).catch(() => notify('Configure Firebase Auth first', 'error'))}
+              className="text-xs bg-white text-indigo-700 font-semibold px-3 py-1 rounded-lg shadow"
+            >
+              Sign In
+            </button>
+          )}
+        </div>
+      </header>
+
+      {/* Toast Notification */}
+      {toast && (
+        <div className="fixed top-16 right-4 z-50 bg-slate-900 text-white text-xs px-4 py-2.5 rounded-xl shadow-lg border border-indigo-500/40">
+          {toast.msg}
+        </div>
+      )}
+
+      {/* Main Content Area */}
+      <main className="flex-1 max-w-3xl w-full mx-auto p-4 pb-24">
+        {activeTab === 'tutor' && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <h2 className="font-bold text-base flex items-center gap-2">
+                <Bot className="w-5 h-5 text-indigo-500" /> AI Study Tutor
+              </h2>
+              <select
+                value={selectedPersona}
+                onChange={(e) => setSelectedPersona(e.target.value)}
+                className={`text-xs rounded-lg px-2.5 py-1.5 border ${darkMode ? 'bg-slate-900 border-slate-700' : 'bg-white border-slate-300'}`}
+              >
+                <option>Friendly Tutor</option>
+                <option>Socratic Mentor</option>
+                <option>Strict Examiner</option>
+              </select>
+            </div>
+
+            <div className={`h-[55vh] overflow-y-auto rounded-2xl p-4 space-y-3 border ${darkMode ? 'bg-slate-900/70 border-slate-800' : 'bg-white border-slate-200'}`}>
+              {messages.length === 0 && (
+                <p className="text-sm text-slate-400 text-center mt-16">
+                  Ask any question on Science, Math, History, or Coding to begin!
+                </p>
+              )}
+              {messages.map((m, idx) => (
+                <div key={idx} className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
+                  <div className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm whitespace-pre-wrap ${
+                    m.role === 'user'
+                      ? 'bg-indigo-600 text-white'
+                      : darkMode ? 'bg-slate-800 text-slate-100' : 'bg-slate-100 text-slate-800'
+                  }`}>
+                    {m.text}
+                  </div>
+                  <span className="text-[10px] text-slate-400 mt-1">{m.time}</span>
+                </div>
+              ))}
+              {isGenerating && <p className="text-xs text-indigo-400 animate-pulse">AI Tutor is thinking...</p>}
+            </div>
+
+            <form onSubmit={handleSendMessage} className="flex gap-2">
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                placeholder="Ask a doubt or paste a problem..."
+                className={`flex-1 rounded-xl px-3.5 py-2.5 text-sm border focus:outline-none focus:ring-2 focus:ring-indigo-500 ${darkMode ? 'bg-slate-900 border-slate-700' : 'bg-white border-slate-300'}`}
+              />
+              <button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-xl font-medium text-sm flex items-center gap-1">
+                <Send className="w-4 h-4" />
+              </button>
+            </form>
+          </div>
+        )}
+
+        {activeTab === 'exam' && (
+          <div className="space-y-4">
+            <h2 className="font-bold text-base flex items-center gap-2">
+              <Brain className="w-5 h-5 text-indigo-500" /> AI Exam Simulator
+            </h2>
+            <div className="flex gap-2 flex-wrap">
+              <input
+                type="text"
+                value={examTopic}
+                onChange={(e) => setExamTopic(e.target.value)}
+                placeholder="Enter topic (e.g., Quadratic Equations, Photosynthesis)"
+                className={`flex-1 min-w-[200px] rounded-xl px-3.5 py-2 text-sm border ${darkMode ? 'bg-slate-900 border-slate-700' : 'bg-white border-slate-300'}`}
+              />
+              <select
+                value={examDifficulty}
+                onChange={(e) => setExamDifficulty(e.target.value)}
+                className={`rounded-xl px-3 py-2 text-sm border ${darkMode ? 'bg-slate-900 border-slate-700' : 'bg-white border-slate-300'}`}
+              >
+                <option>Easy</option>
+                <option>Medium</option>
+                <option>Hard</option>
+              </select>
+              <button
+                onClick={handleGenerateQuiz}
+                disabled={isGeneratingExam}
+                className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-sm font-medium"
+              >
+                {isGeneratingExam ? 'Generating...' : 'Start Quiz'}
+              </button>
+            </div>
+
+            {examQuestions.map((item, qIdx) => (
+              <div key={qIdx} className={`p-4 rounded-2xl border space-y-2 ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
+                <p className="font-semibold text-sm">{qIdx + 1}. {item.q}</p>
+                <div className="space-y-1.5">
+                  {item.options.map((opt, oIdx) => {
+                    const selected = examAnswers[qIdx] === oIdx;
+                    const isCorrect = item.answer === oIdx;
+                    let btnStyle = darkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200';
+                    if (examSubmitted) {
+                      if (isCorrect) btnStyle = 'bg-emerald-600 text-white border-emerald-600';
+                      else if (selected) btnStyle = 'bg-rose-600 text-white border-rose-600';
+                    } else if (selected) {
+                      btnStyle = 'bg-indigo-600 text-white border-indigo-600';
+                    }
+                    return (
+                      <button
+                        key={oIdx}
+                        onClick={() => !examSubmitted && setExamAnswers({ ...examAnswers, [qIdx]: oIdx })}
+                        className={`w-full text-left px-3 py-2 rounded-xl text-xs border transition ${btnStyle}`}
+                      >
+                        {opt}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+
+            {examQuestions.length > 0 && !examSubmitted && (
+              <button
+                onClick={() => {
+                  setExamSubmitted(true);
+                  addXP(25, 'Completed Mock Quiz');
+                }}
+                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2.5 rounded-xl font-semibold text-sm"
+              >
+                Submit Answers
+              </button>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'community' && (
+          <div className="space-y-4">
+            <h2 className="font-bold text-base flex items-center gap-2">
+              <Users className="w-5 h-5 text-indigo-500" /> Global Study Lounge
+            </h2>
+            <div className={`h-[52vh] overflow-y-auto rounded-2xl p-4 space-y-2.5 border ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
+              {globalMessages.length === 0 && (
+                <p className="text-xs text-slate-400 text-center mt-16">No messages yet. Say hello to fellow learners!</p>
+              )}
+              {globalMessages.map((msg, i) => (
+                <div key={msg.id || i} className={`p-2.5 rounded-xl text-xs ${darkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>
+                  <span className="font-bold text-indigo-400">{msg.name}: </span>
+                  <span>{msg.text}</span>
+                </div>
+              ))}
+            </div>
+            <form onSubmit={handleSendGlobalChat} className="flex gap-2">
+              <input
+                type="text"
+                value={globalInput}
+                onChange={(e) => setGlobalInput(e.target.value)}
+                placeholder="Share a study tip or ask peers..."
+                className={`flex-1 rounded-xl px-3.5 py-2 text-sm border ${darkMode ? 'bg-slate-900 border-slate-700' : 'bg-white border-slate-300'}`}
+              />
+              <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-sm font-medium">
+                Post
+              </button>
+            </form>
+          </div>
+        )}
+
+        {activeTab === 'leaderboard' && (
+          <div className="space-y-3">
+            <h2 className="font-bold text-base flex items-center gap-2">
+              <Trophy className="w-5 h-5 text-amber-500" /> Top Scholars Leaderboard
+            </h2>
+            <div className={`rounded-2xl border divide-y ${darkMode ? 'bg-slate-900 border-slate-800 divide-slate-800' : 'bg-white border-slate-200 divide-slate-100'}`}>
+              {(leaderboard.length > 0 ? leaderboard : [{ id: '1', name: profile?.name || 'You', xp: profile?.xp || 100 }]).map((entry, idx) => (
+                <div key={entry.id || idx} className="flex items-center justify-between px-4 py-3 text-sm">
+                  <div className="flex items-center gap-3">
+                    <span className="font-bold text-indigo-500">#{idx + 1}</span>
+                    <span>{entry.name || 'Scholar'}</span>
+                  </div>
+                  <span className="font-semibold text-amber-500">{entry.xp || 0} XP</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </main>
+
+      {/* Bottom Mobile Navigation */}
+      <nav className={`fixed bottom-0 inset-x-0 border-t px-2 py-2 flex justify-around z-30 ${darkMode ? 'bg-slate-900/95 border-slate-800' : 'bg-white/95 border-slate-200'}`}>
+        {[
+          { id: 'tutor', label: 'AI Tutor', icon: Bot },
+          { id: 'exam', label: 'Exam', icon: Brain },
+          { id: 'community', label: 'Chat', icon: MessageSquare },
+          { id: 'leaderboard', label: 'Rank', icon: Trophy }
+        ].map((tab) => {
+          const Icon = tab.icon;
+          const active = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`flex flex-col items-center gap-1 px-3 py-1 rounded-xl text-xs font-medium ${
+                active ? 'text-indigo-500' : 'text-slate-400'
+              }`}
+            >
+              <Icon className="w-5 h-5" />
+              <span>{tab.label}</span>
+            </button>
+          );
+        })}
+      </nav>
+    </div>
+  );
+}
+
+export default App;
