@@ -122,8 +122,8 @@ export default function App() {
           })
         });
         const data = await res.json();
-        const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || 'উত্তর তৈরি করা সম্ভব হয়নি। API Key চেক করুন।';
-        setMessages((prev) => [...prev, { role: 'ai', text: reply, time: timeNow }]);
+        const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || `Google Error: ${data?.error?.message || JSON.stringify(data)}`;
+setMessages((prev) => [...prev, { role: 'ai', text: reply, time: timeNow }]);
       }
       setXp((prev) => prev + 10);
     } catch (err) {
