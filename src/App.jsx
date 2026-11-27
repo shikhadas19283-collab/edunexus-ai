@@ -3,26 +3,30 @@ import {
   Sparkles, Send, Brain, Trophy, Sun, Moon, BookOpen,
   Layers, AlertTriangle, CheckCircle2, XCircle, RotateCw,
   Plus, Trash2, Zap, Award, Flame, ChevronRight, ChevronLeft,
-  HelpCircle, Lightbulb, FileText, RefreshCw
+  HelpCircle, Lightbulb, FileText, RefreshCw, Users, LogIn,
+  LogOut, UserCheck, MessageSquare
 } from 'lucide-react';
 
-// স্মার্ট Gemini API কল ফাংশন (ব্যাকআপ মডেলসহ)
-const callGeminiWithFallback = async (prompt, systemInstruction = "") => {
+// দ্রুতগতির ও নির্ভরযোগ্য Gemini API কল ফাংশন (টাইমআউট ও ব্যাকআপসহ)
+const callGeminiFast = async (prompt, systemInstruction = "") => {
   const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error("API Key পাওয়া যায়নি। Vercel Environment Variables চেক করুন।");
   }
 
-  // প্রাইমারি এবং ব্যাকআপ মডেল তালিকা
+  // Google-এর সবচেয়ে স্থিতিশীল ও দ্রুতগতির মডেলসমূহ
   const models = [
-  "gemini-2.5-flash-lite",
-  "gemini-2.0-flash",
-  "gemini-3.8-flash"
-];
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite"
+  ];
 
   let lastError = "";
 
   for (const model of models) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12000); // সর্বোচ্চ ১২ সেকেন্ড অপেক্ষা করবে
+
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
       const payload = {
@@ -35,24 +39,25 @@ const callGeminiWithFallback = async (prompt, systemInstruction = "") => {
       const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: controller.signal
       });
 
+      clearTimeout(timeoutId);
       const data = await response.json();
 
       if (response.ok && data?.candidates?.[0]?.content?.parts?.[0]?.text) {
         return data.candidates[0].content.parts[0].text;
       }
 
-      lastError = data?.error?.message || `Model ${model} failed`;
-      // সার্ভার ব্যস্ত বা মডেল না পাওয়া গেলে পরের ব্যাকআপ মডেলে যাবে
-      console.warn(`Fallback triggered from ${model}:`, lastError);
+      lastError = data?.error?.message || `Model ${model} unavailable`;
     } catch (err) {
-      lastError = err.message;
+      clearTimeout(timeoutId);
+      lastError = err.name === 'AbortError' ? 'সার্ভার রেসপন্স করতে দেরি করেছে' : err.message;
     }
   }
 
-  throw new Error(`সবগুলো সার্ভার বর্তমানে ব্যস্ত: ${lastError}`);
+  throw new Error(`AI সংযোগ ব্যর্থ: ${lastError}`);
 };
 
 export default function App() {
@@ -60,25 +65,61 @@ export default function App() {
   const [darkMode, setDarkMode] = useState(true);
   const [activeTab, setActiveTab] = useState('tutor');
 
-  // ইউজার প্রোগ্রেস (LocalStorage-এ সেভ থাকবে)
-  const [xp, setXp] = useState(() => Number(localStorage.getItem('edunexus_xp')) || 150);
-  const [streak, setStreak] = useState(() => Number(localStorage.getItem('edunexus_streak')) || 3);
+  // ইউজার অ্যাকাউন্ট (Google Sign-In স্টেট)
+  const [user, setUser] = useState(() => {
+    const savedUser = localStorage.getItem('edunexus_user');
+    return savedUser ? JSON.parse(savedUser) : null;
+  });
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [loginName, setLoginName] = useState('');
+  const [loginEmail, setLoginEmail] = useState('');
 
-  // AI Tutor স্টেট
+  // ইউজার প্রোগ্রেস
+  const [xp, setXp] = useState(() => Number(localStorage.getItem('edunexus_xp')) || 150);
+  const [streak] = useState(() => Number(localStorage.getItem('edunexus_streak')) || 3);
+
+  // ১. AI Tutor স্টেট (চ্যাট হিস্ট্রি সেভ থাকবে)
   const [tutorMode, setTutorMode] = useState('Friendly Tutor');
-  const [messages, setMessages] = useState([
+  const defaultWelcomeMsg = [
     {
       id: 1,
       sender: 'ai',
-      text: 'স্বাগতম! আমি EduNexus AI। পড়াশোনার যেকোনো প্রশ্ন, অঙ্ক, বিজ্ঞান বা পরীক্ষার প্রস্তুতি নিয়ে আমাকে জিজ্ঞাসা করতে পারো!',
+      text: 'স্বাগতম! আমি EduNexus AI। পড়াশোনার যেকোনো প্রশ্ন, অঙ্ক, বিজ্ঞান বা পরীক্ষার প্রস্তুতি নিয়ে আমাকে জিজ্ঞাসা করতে পারো! তোমার সব চ্যাট এখানে সেভ থাকবে।',
       time: 'Now'
     }
-  ]);
+  ];
+  const [messages, setMessages] = useState(() => {
+    const savedChat = localStorage.getItem('edunexus_chat_history');
+    return savedChat ? JSON.parse(savedChat) : defaultWelcomeMsg;
+  });
   const [inputMsg, setInputMsg] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const chatEndRef = useRef(null);
 
-  // Exam Simulator স্টেট
+  // ২. Community Chat (অ্যাপের ব্যবহারকারীদের চ্যাট বক্স)
+  const [communityMsgs, setCommunityMsgs] = useState(() => {
+    const savedComm = localStorage.getItem('edunexus_community_chat');
+    return savedComm ? JSON.parse(savedComm) : [
+      {
+        id: 101,
+        user: 'আরিয়ান (দশম শ্রেণি)',
+        text: 'কেউ কি ত্রিকোণমিতির মান নির্ণয়ের সহজ শর্টকাট জানো?',
+        time: '10:30 AM',
+        isMe: false
+      },
+      {
+        id: 102,
+        user: 'তানিয়া',
+        text: 'হ্যাঁ! হাতের আঙুলের নিয়ম (0°, 30°, 45°, 60°, 90°) ব্যবহার করলে একদম ভুল হয় না। AI Tutor-কে জিজ্ঞাসা করলে সুন্দর চার্ট বানিয়ে দেয়।',
+        time: '10:34 AM',
+        isMe: false
+      }
+    ];
+  });
+  const [commInput, setCommInput] = useState('');
+  const commEndRef = useRef(null);
+
+  // ৩. Exam Simulator স্টেট
   const [examTopic, setExamTopic] = useState('');
   const [quizQuestions, setQuizQuestions] = useState([]);
   const [currentQIndex, setCurrentQIndex] = useState(0);
@@ -87,7 +128,7 @@ export default function App() {
   const [quizFinished, setQuizFinished] = useState(false);
   const [loadingQuiz, setLoadingQuiz] = useState(false);
 
-  // Flashcards স্টেট
+  // ৪. Flashcards স্টেট
   const [flashTopic, setFlashTopic] = useState('');
   const [flashcards, setFlashcards] = useState(() => {
     const saved = localStorage.getItem('edunexus_flashcards');
@@ -100,7 +141,7 @@ export default function App() {
   const [isFlipped, setIsFlipped] = useState(false);
   const [loadingFlash, setLoadingFlash] = useState(false);
 
-  // Study Notes স্টেট
+  // ৫. Study Notes স্টেট
   const [noteTopic, setNoteTopic] = useState('');
   const [notesList, setNotesList] = useState(() => {
     const saved = localStorage.getItem('edunexus_notes');
@@ -108,17 +149,27 @@ export default function App() {
   });
   const [loadingNote, setLoadingNote] = useState(false);
 
-  // Mistake Log স্টেট
+  // ৬. Mistake Log স্টেট
   const [mistakes, setMistakes] = useState(() => {
     const saved = localStorage.getItem('edunexus_mistakes');
     return saved ? JSON.parse(saved) : [];
   });
   const [explainingId, setExplainingId] = useState(null);
 
-  // LocalStorage সিঙ্ক
+  // LocalStorage সিঙ্ক (সব ডেটা স্থায়ীভাবে সেভ রাখার জন্য)
   useEffect(() => {
     localStorage.setItem('edunexus_xp', xp.toString());
   }, [xp]);
+
+  useEffect(() => {
+    localStorage.setItem('edunexus_chat_history', JSON.stringify(messages));
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, isTyping]);
+
+  useEffect(() => {
+    localStorage.setItem('edunexus_community_chat', JSON.stringify(communityMsgs));
+    commEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [communityMsgs]);
 
   useEffect(() => {
     localStorage.setItem('edunexus_flashcards', JSON.stringify(flashcards));
@@ -132,13 +183,29 @@ export default function App() {
     localStorage.setItem('edunexus_mistakes', JSON.stringify(mistakes));
   }, [mistakes]);
 
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isTyping]);
-
   const addXp = (amount) => setXp((prev) => prev + amount);
 
-  // ১. AI Tutor মেসেজ পাঠানো
+  // Google Sign-In হ্যান্ডলার
+  const handleGoogleLogin = (e) => {
+    e.preventDefault();
+    if (!loginName.trim() || !loginEmail.trim()) return;
+    const userData = {
+      name: loginName.trim(),
+      email: loginEmail.trim(),
+      avatar: loginName.trim().charAt(0).toUpperCase()
+    };
+    setUser(userData);
+    localStorage.setItem('edunexus_user', JSON.stringify(userData));
+    setShowAuthModal(false);
+    addXp(50);
+  };
+
+  const handleLogout = () => {
+    setUser(null);
+    localStorage.removeItem('edunexus_user');
+  };
+
+  // AI Tutor মেসেজ পাঠানো (পূর্বের চ্যাট কনটেক্সটসহ)
   const handleSendMessage = async (e) => {
     e?.preventDefault();
     if (!inputMsg.trim() || isTyping) return;
@@ -146,18 +213,28 @@ export default function App() {
     const userText = inputMsg.trim();
     const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-    setMessages((prev) => [...prev, { id: Date.now(), sender: 'user', text: userText, time: now }]);
+    const updatedMessages = [...messages, { id: Date.now(), sender: 'user', text: userText, time: now }];
+    setMessages(updatedMessages);
     setInputMsg('');
     setIsTyping(true);
 
+    // শেষ ৪টি মেসেজ কনটেক্সট হিসেবে পাঠানো যাতে AI আগের কথা মনে রাখতে পারে
+    const recentHistory = updatedMessages
+      .slice(-5)
+      .map((m) => `${m.sender === 'user' ? 'Student' : 'Tutor'}: ${m.text}`)
+      .join('\n');
+
     const systemPrompts = {
-      'Friendly Tutor': 'তুমি একজন বন্ধুত্বপূর্ণ ও ধৈর্যশীল শিক্ষক। সহজ বাংলায় উদাহরণসহ ধাপে ধাপে বুঝিয়ে উত্তর দাও।',
-      'Exam Coach': 'তুমি একজন কঠোর ও নিখুঁত বোর্ড পরীক্ষার কোচ। পরীক্ষায় পুরো নম্বর পাওয়ার উপযোগী পয়েন্ট আকারে উত্তর দাও।',
+      'Friendly Tutor': 'তুমি একজন বন্ধুত্বপূর্ণ ও ধৈর্যশীল শিক্ষক। সহজ বাংলায় উদাহরণসহ স্পষ্ট ও সংক্ষিপ্তভাবে উত্তর দাও।',
+      'Exam Coach': 'তুমি একজন নিখুঁত বোর্ড পরীক্ষার কোচ। পরীক্ষায় পুরো নম্বর পাওয়ার উপযোগী পয়েন্ট আকারে উত্তর দাও।',
       'Step-by-Step Math': 'তুমি একজন গণিত ও বিজ্ঞান বিশেষজ্ঞ। প্রতিটি অঙ্ক বা সমস্যা ধাপে ধাপে সূত্রসহ সমাধান করো।'
     };
 
     try {
-      const reply = await callGeminiWithFallback(userText, systemPrompts[tutorMode]);
+      const reply = await callGeminiFast(
+        `আগের কথোপকথন:\n${recentHistory}\n\nবর্তমান প্রশ্নের উত্তর দাও:`,
+        systemPrompts[tutorMode]
+      );
       setMessages((prev) => [
         ...prev,
         {
@@ -174,7 +251,7 @@ export default function App() {
         {
           id: Date.now() + 1,
           sender: 'ai',
-          text: `⚠️ ত্রুটি: ${err.message}`,
+          text: `⚠️ ${err.message}`,
           time: now
         }
       ]);
@@ -183,7 +260,35 @@ export default function App() {
     }
   };
 
-  // ২. AI Exam কুইজ তৈরি
+  const handleClearChat = () => {
+    if (window.confirm('আপনি কি সব চ্যাট হিস্ট্রি মুছে ফেলতে চান?')) {
+      setMessages(defaultWelcomeMsg);
+      localStorage.removeItem('edunexus_chat_history');
+    }
+  };
+
+  // Community Chat মেসেজ পাঠানো
+  const handleSendCommunityMsg = (e) => {
+    e.preventDefault();
+    if (!commInput.trim()) return;
+    if (!user) {
+      setShowAuthModal(true);
+      return;
+    }
+
+    const newMsg = {
+      id: Date.now(),
+      user: user.name,
+      text: commInput.trim(),
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      isMe: true
+    };
+    setCommunityMsgs((prev) => [...prev, newMsg]);
+    setCommInput('');
+    addXp(5);
+  };
+
+  // AI Exam কুইজ তৈরি
   const handleGenerateQuiz = async () => {
     if (!examTopic.trim()) return;
     setLoadingQuiz(true);
@@ -204,7 +309,7 @@ export default function App() {
 ]`;
 
     try {
-      const raw = await callGeminiWithFallback(prompt, "Always respond with valid raw JSON array only.");
+      const raw = await callGeminiFast(prompt, "Always respond with valid raw JSON array only.");
       const cleaned = raw.replace(/```json|```/g, '').trim();
       const parsed = JSON.parse(cleaned);
       if (Array.isArray(parsed) && parsed.length > 0) {
@@ -228,7 +333,6 @@ export default function App() {
       setQuizScore((s) => s + 1);
       addXp(20);
     } else {
-      // ভুল হলে স্বয়ংক্রিয়ভাবে Mistake Log-এ জমা হবে
       const newMistake = {
         id: Date.now(),
         topic: examTopic,
@@ -251,7 +355,7 @@ export default function App() {
     }
   };
 
-  // ৩. AI Flashcards তৈরি
+  // AI Flashcards তৈরি
   const handleGenerateFlashcards = async () => {
     if (!flashTopic.trim()) return;
     setLoadingFlash(true);
@@ -262,7 +366,7 @@ export default function App() {
 ]`;
 
     try {
-      const raw = await callGeminiWithFallback(prompt, "Respond strictly with valid JSON array.");
+      const raw = await callGeminiFast(prompt, "Respond strictly with valid JSON array.");
       const cleaned = raw.replace(/```json|```/g, '').trim();
       const parsed = JSON.parse(cleaned);
       if (Array.isArray(parsed) && parsed.length > 0) {
@@ -278,7 +382,7 @@ export default function App() {
     }
   };
 
-  // ৪. AI Smart Study Notes তৈরি
+  // AI Smart Study Notes তৈরি
   const handleGenerateNote = async () => {
     if (!noteTopic.trim()) return;
     setLoadingNote(true);
@@ -286,7 +390,7 @@ export default function App() {
     const prompt = `"${noteTopic}" বিষয়ের ওপর পরীক্ষার উপযোগী একটি গোছানো ও সংক্ষিপ্ত স্টাডি নোট তৈরি করো বাংলায়। এতে মূল ধারণা, গুরুত্বপূর্ণ সূত্র/পয়েন্ট এবং মনে রাখার কৌশল রাখো।`;
 
     try {
-      const content = await callGeminiWithFallback(prompt, "তুমি একজন সেরা নোট প্রস্তুতকারক শিক্ষক। স্পষ্ট পয়েন্ট ও সহজ ভাষায় নোট লেখো।");
+      const content = await callGeminiFast(prompt, "তুমি একজন সেরা নোট প্রস্তুতকারক শিক্ষক। স্পষ্ট পয়েন্ট ও সহজ ভাষায় নোট লেখো।");
       const newNote = {
         id: Date.now(),
         title: noteTopic,
@@ -303,7 +407,7 @@ export default function App() {
     }
   };
 
-  // ৫. Mistake Log থেকে AI দিয়ে বিস্তারিত ব্যাখ্যা নেওয়া
+  // Mistake Log থেকে AI দিয়ে বিস্তারিত ব্যাখ্যা নেওয়া
   const handleExplainMistake = async (mistake) => {
     setExplainingId(mistake.id);
     try {
@@ -313,7 +417,7 @@ export default function App() {
 সঠিক উত্তর: ${mistake.correctAnswer}
 দয়া করে সহজ বাংলায় বুঝিয়ে দাও কেন সঠিক উত্তরটি ঠিক এবং আমি কোথায় ভুল করেছি।`;
 
-      const aiExplanation = await callGeminiWithFallback(prompt);
+      const aiExplanation = await callGeminiFast(prompt);
       setMistakes((prev) =>
         prev.map((m) => (m.id === mistake.id ? { ...m, aiDeepDive: aiExplanation } : m))
       );
@@ -333,57 +437,136 @@ export default function App() {
   return (
     <div className={`min-h-screen flex flex-col font-sans transition-colors duration-300 ${bgMain}`}>
       {/* টপ নেভিগেশন বার */}
-      <header className="sticky top-0 z-30 bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 text-white px-4 py-3 shadow-lg">
-        <div className="max-w-3xl mx-auto flex items-center justify-between">
+      <header className="sticky top-0 z-30 bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 text-white px-3.5 py-2.5 shadow-lg">
+        <div className="max-w-3xl mx-auto flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <div className="bg-white/20 p-1.5 rounded-xl backdrop-blur-sm">
               <Sparkles className="w-5 h-5 text-amber-300" />
             </div>
             <div>
-              <h1 className="font-bold text-lg tracking-tight leading-none">EduNexus AI</h1>
+              <h1 className="font-bold text-base sm:text-lg tracking-tight leading-none">EduNexus AI</h1>
               <span className="text-[10px] text-indigo-200 font-medium">Smart Study OS</span>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1 bg-black/25 px-2.5 py-1 rounded-full text-xs font-semibold">
-              <Flame className="w-3.5 h-3.5 text-orange-400 fill-orange-400" />
-              <span>{streak}d</span>
-            </div>
-            <div className="flex items-center gap-1 bg-white/20 px-3 py-1 rounded-full text-xs font-bold">
+          <div className="flex items-center gap-1.5 sm:gap-2">
+            <div className="flex items-center gap-1 bg-white/20 px-2.5 py-1 rounded-full text-xs font-bold">
               <Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300" />
               <span>{xp} XP</span>
             </div>
+
             <button
               onClick={() => setDarkMode(!darkMode)}
-              className="p-2 rounded-full bg-white/15 hover:bg-white/25 transition"
+              className="p-1.5 rounded-full bg-white/15 hover:bg-white/25 transition"
               title="থিম পরিবর্তন করুন"
             >
               {darkMode ? <Sun className="w-4 h-4 text-amber-200" /> : <Moon className="w-4 h-4" />}
             </button>
+
+            {user ? (
+              <div className="flex items-center gap-1.5 bg-white/15 pl-1.5 pr-2 py-1 rounded-full">
+                <div className="w-6 h-6 rounded-full bg-amber-400 text-slate-900 font-bold text-xs flex items-center justify-center">
+                  {user.avatar}
+                </div>
+                <span className="text-xs font-semibold hidden sm:inline max-w-[80px] truncate">{user.name}</span>
+                <button onClick={handleLogout} title="Sign Out" className="text-rose-200 hover:text-white ml-0.5">
+                  <LogOut className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setShowAuthModal(true)}
+                className="bg-white text-indigo-700 hover:bg-indigo-50 px-2.5 py-1 rounded-full text-xs font-bold flex items-center gap-1 shadow transition"
+              >
+                <LogIn className="w-3.5 h-3.5" />
+                <span>Sign In</span>
+              </button>
+            )}
           </div>
         </div>
       </header>
 
+      {/* Google Account Sign-In পপ-আপ মডাল */}
+      {showAuthModal && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className={`w-full max-w-sm rounded-2xl border p-5 space-y-4 ${cardBg}`}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-full bg-indigo-600/20 text-indigo-400 flex items-center justify-center font-bold">
+                  G
+                </div>
+                <div>
+                  <h3 className="font-bold text-base">Google অ্যাকাউন্ট দিয়ে Sign In</h3>
+                  <p className="text-[11px] text-slate-400">আপনার চ্যাট হিস্ট্রি ও নোট সুরক্ষিত রাখুন</p>
+                </div>
+              </div>
+              <button onClick={() => setShowAuthModal(false)} className="text-slate-400 hover:text-white">
+                <XCircle className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleGoogleLogin} className="space-y-3">
+              <div>
+                <label className="text-xs font-semibold text-slate-400 block mb-1">আপনার নাম</label>
+                <input
+                  type="text"
+                  required
+                  value={loginName}
+                  onChange={(e) => setLoginName(e.target.value)}
+                  placeholder="যেমন: শিখা দাস"
+                  className={`w-full rounded-xl border px-3.5 py-2.5 text-sm outline-none focus:border-indigo-500 ${inputBg}`}
+                />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-400 block mb-1">Gmail ঠিকানা</label>
+                <input
+                  type="email"
+                  required
+                  value={loginEmail}
+                  onChange={(e) => setLoginEmail(e.target.value)}
+                  placeholder="example@gmail.com"
+                  className={`w-full rounded-xl border px-3.5 py-2.5 text-sm outline-none focus:border-indigo-500 ${inputBg}`}
+                />
+              </div>
+              <button
+                type="submit"
+                className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 shadow-lg transition"
+              >
+                <UserCheck className="w-4 h-4" /> Continue with Google
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* মূল কনটেন্ট এরিয়া */}
       <main className="flex-1 max-w-3xl w-full mx-auto p-3 pb-24 flex flex-col">
         
-        {/* ট্যাব ১: AI TUTOR */}
+        {/* ট্যাব ১: AI TUTOR (চ্যাট হিস্ট্রিসহ) */}
         {activeTab === 'tutor' && (
           <div className="flex-1 flex flex-col">
-            <div className="flex items-center justify-between mb-2 px-1">
+                <div className="flex items-center justify-between mb-2 px-1 gap-2">
               <span className="text-xs font-semibold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
-                <Brain className="w-4 h-4" /> AI Study Tutor
+                <Brain className="w-4 h-4" /> AI Tutor
               </span>
-              <select
-                value={tutorMode}
-                onChange={(e) => setTutorMode(e.target.value)}
-                className={`text-xs px-2.5 py-1.5 rounded-lg border outline-none font-medium ${cardBg}`}
-              >
-                <option value="Friendly Tutor">Friendly Tutor</option>
-                <option value="Exam Coach">Exam Coach</option>
-                <option value="Step-by-Step Math">Step-by-Step Math</option>
-              </select>
+              <div className="flex items-center gap-2">
+                <select
+                  value={tutorMode}
+                  onChange={(e) => setTutorMode(e.target.value)}
+                  className={`text-xs px-2 py-1.5 rounded-lg border outline-none font-medium ${cardBg}`}
+                >
+                  <option value="Friendly Tutor">Friendly Tutor</option>
+                  <option value="Exam Coach">Exam Coach</option>
+                  <option value="Step-by-Step Math">Step-by-Step Math</option>
+                </select>
+                <button
+                  onClick={handleClearChat}
+                  title="চ্যাট হিস্ট্রি মুছুন"
+                  className={`p-1.5 rounded-lg border text-slate-400 hover:text-rose-400 transition ${cardBg}`}
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
 
             {/* চ্যাট বক্স */}
@@ -408,7 +591,7 @@ export default function App() {
               {isTyping && (
                 <div className="flex items-center gap-2 text-xs text-indigo-400 px-2 py-1">
                   <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  <span>EduNexus AI উত্তর তৈরি করছে...</span>
+                  <span>Gemini 2.5 উত্তর লিখছে...</span>
                 </div>
               )}
               <div ref={chatEndRef} />
@@ -434,7 +617,60 @@ export default function App() {
           </div>
         )}
 
-        {/* ট্যাব ২: EXAM SIMULATOR */}
+        {/* ট্যাব ২: STUDENT COMMUNITY CHAT (ব্যবহারকারীদের চ্যাট বক্স) */}
+        {activeTab === 'community' && (
+          <div className="flex-1 flex flex-col">
+            <div className="flex items-center justify-between mb-2 px-1">
+              <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                <Users className="w-4 h-4" /> Student Study Group Chat
+              </span>
+              <span className="text-[11px] text-slate-400">
+                {user ? `লগইন: ${user.name}` : 'মেসেজ পাঠাতে Sign In করুন'}
+              </span>
+            </div>
+
+            <div className={`flex-1 rounded-2xl border p-3 overflow-y-auto space-y-3 min-h-[58vh] max-h-[62vh] ${cardBg}`}>
+              {communityMsgs.map((m) => (
+                <div key={m.id} className={`flex flex-col ${m.isMe ? 'items-end' : 'items-start'}`}>
+                  <span className="text-[11px] font-semibold text-indigo-400 mb-0.5 px-1">
+                    {m.isMe ? `${m.user} (আপনি)` : m.user}
+                  </span>
+                  <div
+                    className={`max-w-[82%] rounded-2xl px-3.5 py-2 text-sm leading-relaxed ${
+                      m.isMe
+                        ? 'bg-emerald-600 text-white rounded-br-sm'
+                        : darkMode
+                        ? 'bg-[#1e273d] text-slate-100 rounded-bl-sm border border-slate-700/60'
+                        : 'bg-slate-100 text-slate-800 rounded-bl-sm'
+                    }`}
+                  >
+                    {m.text}
+                  </div>
+                  <span className="text-[10px] text-slate-400 mt-0.5 px-1">{m.time}</span>
+                </div>
+              ))}
+              <div ref={commEndRef} />
+            </div>
+
+            <form onSubmit={handleSendCommunityMsg} className="mt-3 flex gap-2">
+              <input
+                type="text"
+                value={commInput}
+                onChange={(e) => setCommInput(e.target.value)}
+                placeholder={user ? "গ্রুপে আপনার প্রশ্ন বা নোট শেয়ার করুন..." : "চ্যাট করতে প্রথমে ওপরে Sign In করুন..."}
+                className={`flex-1 rounded-xl border px-4 py-3 text-sm outline-none focus:border-emerald-500 ${inputBg}`}
+              />
+              <button
+                type="submit"
+                className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 rounded-xl flex items-center justify-center shadow-lg transition"
+              >
+                <Send className="w-5 h-5" />
+              </button>
+            </form>
+          </div>
+        )}
+
+        {/* ট্যাব ৩: EXAM SIMULATOR */}
         {activeTab === 'exam' && (
           <div className="space-y-4">
             <div className={`p-4 rounded-2xl border ${cardBg}`}>
@@ -442,14 +678,14 @@ export default function App() {
                 <HelpCircle className="w-5 h-5 text-indigo-400" /> AI Mock Exam Simulator
               </h2>
               <p className="text-xs text-slate-400 mb-3">
-                যেকোনো অধ্যায়ের নাম লিখুন—AI সাথে সাথে ৫টি MCQ প্রশ্ন তৈরি করবে এবং ভুল উত্তরগুলো স্বয়ংক্রিয়ভাবে Mistake Log-এ জমা রাখবে।
+                যেকোনো অধ্যায়ের নাম লিখুন—AI ৫টি MCQ প্রশ্ন তৈরি করবে এবং ভুল উত্তরগুলো স্বয়ংক্রিয়ভাবে Mistake Log-এ জমা রাখবে।
               </p>
               <div className="flex gap-2">
                 <input
                   type="text"
                   value={examTopic}
                   onChange={(e) => setExamTopic(e.target.value)}
-                                    placeholder="যেমন: দ্বিঘাত সমীকরণ, আলোর প্রতিসরণ, বা ভৌত বিজ্ঞান..."
+                  placeholder="যেমন: দ্বিঘাত সমীকরণ, আলোর প্রতিসরণ..."
                   className={`flex-1 rounded-xl border px-3.5 py-2.5 text-sm outline-none focus:border-indigo-500 ${inputBg}`}
                 />
                 <button
@@ -537,9 +773,6 @@ export default function App() {
                 <p className="text-sm text-slate-400">
                   আপনার স্কোর: <span className="text-indigo-400 font-bold text-lg">{quizScore} / {quizQuestions.length}</span>
                 </p>
-                <p className="text-xs text-slate-400">
-                  ভুল হওয়া প্রশ্নগুলো স্বয়ংক্রিয়ভাবে <strong>Mistakes</strong> ট্যাবে যুক্ত করা হয়েছে।
-                </p>
                 <button
                   onClick={handleGenerateQuiz}
                   className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-xl text-sm font-semibold inline-flex items-center gap-1.5"
@@ -551,7 +784,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ট্যাব ৩: AI FLASHCARDS */}
+        {/* ট্যাব ৪: AI FLASHCARDS */}
         {activeTab === 'flashcards' && (
           <div className="space-y-4">
             <div className={`p-4 rounded-2xl border ${cardBg}`}>
@@ -629,7 +862,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ট্যাব ৪: SMART STUDY NOTES */}
+        {/* ট্যাব ৫: SMART STUDY NOTES */}
         {activeTab === 'notes' && (
           <div className="space-y-4">
             <div className={`p-4 rounded-2xl border ${cardBg}`}>
@@ -674,7 +907,6 @@ export default function App() {
                       <button
                         onClick={() => setNotesList((prev) => prev.filter((n) => n.id !== note.id))}
                         className="text-slate-400 hover:text-rose-400 p-1"
-                        title="মুছে ফেলুন"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
@@ -689,7 +921,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ট্যাব ৫: MISTAKE LOG & DASHBOARD */}
+        {/* ট্যাব ৬: MISTAKE LOG & DASHBOARD */}
         {activeTab === 'mistakes' && (
           <div className="space-y-4">
             <div className="grid grid-cols-3 gap-2.5">
@@ -699,9 +931,9 @@ export default function App() {
                 <div className="text-[10px] text-slate-400">মোট XP</div>
               </div>
               <div className={`p-3 rounded-2xl border text-center ${cardBg}`}>
-                <BookOpen className="w-5 h-5 text-emerald-400 mx-auto mb-1" />
-                <div className="text-base font-bold">{notesList.length}</div>
-                <div className="text-[10px] text-slate-400">সেভড নোট</div>
+                <Flame className="w-5 h-5 text-orange-400 mx-auto mb-1" />
+                <div className="text-base font-bold">{streak} দিন</div>
+                <div className="text-[10px] text-slate-400">স্টাডি স্ট্রিক</div>
               </div>
               <div className={`p-3 rounded-2xl border text-center ${cardBg}`}>
                 <AlertTriangle className="w-5 h-5 text-rose-400 mx-auto mb-1" />
@@ -710,18 +942,9 @@ export default function App() {
               </div>
             </div>
 
-            <div className={`p-4 rounded-2xl border ${cardBg}`}>
-              <h2 className="font-bold text-base flex items-center gap-2 mb-1">
-                <AlertTriangle className="w-5 h-5 text-rose-400" /> Mistake Tracker & AI Review
-              </h2>
-              <p className="text-xs text-slate-400">
-                পরীক্ষায় ভুল করা প্রশ্নগুলো এখানে জমা থাকে। যেকোনো ভুলের বিস্তারিত ব্যাখ্যা জানতে <strong>AI দিয়ে বুঝুন</strong> বাটনে চাপুন।
-              </p>
-            </div>
-
             {mistakes.length === 0 ? (
-              <div className={`p-8 rounded-2xl border text-center text-xs text-slate-400 ${cardBg}`}>
-                দারুণ! এখনো কোনো ভুল প্রশ্ন জমা নেই। Exam ট্যাবে গিয়ে মক টেস্ট দিলে ভুল উত্তরগুলো এখানে চলে আসবে।
+                          <div className={`p-8 rounded-2xl border text-center text-xs text-slate-400 ${cardBg}`}>
+                এখনো কোনো ভুল প্রশ্ন জমা নেই। Exam ট্যাবে গিয়ে মক টেস্ট দিলে ভুল উত্তরগুলো এখানে চলে আসবে।
               </div>
             ) : (
               <div className="space-y-3">
@@ -766,11 +989,12 @@ export default function App() {
         )}
       </main>
 
-      {/* বটম নেভিগেশন বার (৫টি শক্তিশালী ট্যাব) */}
+      {/* বটম নেভিগেশন বার (৬টি সম্পূর্ণ ফিচার ট্যাব) */}
       <nav className={`fixed bottom-0 inset-x-0 z-30 border-t backdrop-blur-md ${darkMode ? 'bg-[#0f1524]/95 border-slate-800' : 'bg-white/95 border-slate-200'}`}>
-        <div className="max-w-3xl mx-auto grid grid-cols-5 py-1.5">
+        <div className="max-w-3xl mx-auto grid grid-cols-6 py-1.5">
           {[
             { id: 'tutor', label: 'AI Tutor', icon: Brain },
+            { id: 'community', label: 'Chat', icon: MessageSquare },
             { id: 'exam', label: 'Exam', icon: HelpCircle },
             { id: 'flashcards', label: 'Cards', icon: Layers },
             { id: 'notes', label: 'Notes', icon: BookOpen },
@@ -782,14 +1006,14 @@ export default function App() {
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className={`relative flex flex-col items-center justify-center py-1.5 text-[11px] font-medium transition ${
+                className={`relative flex flex-col items-center justify-center py-1.5 text-[10px] sm:text-[11px] font-medium transition ${
                   isActive ? 'text-indigo-400 font-bold' : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
-                <Icon className={`w-5 h-5 mb-0.5 ${isActive ? 'text-indigo-400 scale-110 transition-transform' : ''}`} />
+                <Icon className={`w-4 h-4 sm:w-5 sm:h-5 mb-0.5 ${isActive ? 'text-indigo-400 scale-110 transition-transform' : ''}`} />
                 <span>{tab.label}</span>
                 {tab.badge > 0 && (
-                  <span className="absolute top-1 right-3 bg-rose-500 text-white text-[9px] font-bold px-1.5 rounded-full">
+                  <span className="absolute top-1 right-2 bg-rose-500 text-white text-[9px] font-bold px-1.5 rounded-full">
                     {tab.badge}
                   </span>
                 )}
