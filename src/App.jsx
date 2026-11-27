@@ -4,26 +4,51 @@ import {
   Layers, AlertTriangle, CheckCircle2, XCircle, RotateCw,
   Plus, Trash2, Zap, Award, Flame, ChevronRight, ChevronLeft,
   HelpCircle, Lightbulb, FileText, RefreshCw, Users, LogIn,
-  LogOut, UserCheck, MessageSquare
+  LogOut, MessageSquare
 } from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import {
+  getAuth, GoogleAuthProvider, signInWithPopup,
+  signOut, onAuthStateChanged
+} from 'firebase/auth';
+import {
+  getFirestore, collection, addDoc, query,
+  orderBy, limit, onSnapshot, serverTimestamp
+} from 'firebase/firestore';
 
-// দ্রুতগতির ও নির্ভরযোগ্য Gemini API কল ফাংশন (টাইমআউট ও ব্যাকআপসহ)
+// আপনার Firebase কনফিগারেশন
+const firebaseConfig = {
+  apiKey: "AIzaSyAXpE49b0F_yVMvSojIOJIqo4dIumYe_cU",
+  authDomain: "edunexus-ai-48076.firebaseapp.com",
+  projectId: "edunexus-ai-48076",
+  storageBucket: "edunexus-ai-48076.firebasestorage.app",
+  messagingSenderId: "228682156285",
+  appId: "1:228682156285:web:e98d179b8b08a88f2d9694",
+  measurementId: "G-T9XZFBJD26"
+};
+
+const firebaseApp = initializeApp(firebaseConfig);
+const auth = getAuth(firebaseApp);
+const db = getFirestore(firebaseApp);
+const googleProvider = new GoogleAuthProvider();
+
+// দ্রুতগতির Gemini API কল ফাংশন
 const callGeminiFast = async (prompt, systemInstruction = "") => {
   const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error("API Key পাওয়া যায়নি। Vercel Environment Variables চেক করুন।");
   }
 
-  // Google-এর সবচেয়ে স্থিতিশীল ও দ্রুতগতির মডেলসমূহ
   const models = [
     "gemini-3.5-flash-lite",
     "gemini-3.8-flash"
   ];
+
   let lastError = "";
 
   for (const model of models) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 12000); // সর্বোচ্চ ১২ সেকেন্ড অপেক্ষা করবে
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
 
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
@@ -59,18 +84,12 @@ const callGeminiFast = async (prompt, systemInstruction = "") => {
 };
 
 export default function App() {
-  // থিম ও নেভিগেশন স্টেট
   const [darkMode, setDarkMode] = useState(true);
   const [activeTab, setActiveTab] = useState('tutor');
 
-  // ইউজার অ্যাকাউন্ট (Google Sign-In স্টেট)
-  const [user, setUser] = useState(() => {
-    const savedUser = localStorage.getItem('edunexus_user');
-    return savedUser ? JSON.parse(savedUser) : null;
-  });
-  const [showAuthModal, setShowAuthModal] = useState(false);
-  const [loginName, setLoginName] = useState('');
-  const [loginEmail, setLoginEmail] = useState('');
+  // আসল Google Authentication স্টেট
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
   // ইউজার প্রোগ্রেস
   const [xp, setXp] = useState(() => Number(localStorage.getItem('edunexus_xp')) || 150);
@@ -82,7 +101,7 @@ export default function App() {
     {
       id: 1,
       sender: 'ai',
-      text: 'স্বাগতম! আমি EduNexus AI। পড়াশোনার যেকোনো প্রশ্ন, অঙ্ক, বিজ্ঞান বা পরীক্ষার প্রস্তুতি নিয়ে আমাকে জিজ্ঞাসা করতে পারো! তোমার সব চ্যাট এখানে সেভ থাকবে।',
+      text: 'স্বাগতম! আমি EduNexus AI। পড়াশোনার যেকোনো প্রশ্ন, অঙ্ক, বিজ্ঞান বা পরীক্ষার প্রস্তুতি নিয়ে আমাকে জিজ্ঞাসা করতে পারো!',
       time: 'Now'
     }
   ];
@@ -94,13 +113,12 @@ export default function App() {
   const [isTyping, setIsTyping] = useState(false);
   const chatEndRef = useRef(null);
 
-  // ২. Community Chat (অ্যাপের ব্যবহারকারীদের চ্যাট বক্স)
-    const [communityMsgs, setCommunityMsgs] = useState(() => {
-    const savedComm = localStorage.getItem('edunexus_community_chat');
-    return savedComm ? JSON.parse(savedComm) : [];
-  });
+  // ২. রিয়েল-টাইম লাইভ Community Chat স্টেট (Firebase Firestore)
+  const [communityMsgs, setCommunityMsgs] = useState([]);
   const [commInput, setCommInput] = useState('');
+  const [sendingComm, setSendingComm] = useState(false);
   const commEndRef = useRef(null);
+
   // ৩. Exam Simulator স্টেট
   const [examTopic, setExamTopic] = useState('');
   const [quizQuestions, setQuizQuestions] = useState([]);
@@ -138,7 +156,35 @@ export default function App() {
   });
   const [explainingId, setExplainingId] = useState(null);
 
-  // LocalStorage সিঙ্ক (সব ডেটা স্থায়ীভাবে সেভ রাখার জন্য)
+  // Google Auth স্টেট লিসেনার
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setAuthLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Firestore রিয়েল-টাইম লাইভ চ্যাট লিসেনার (সবার মেসেজ লাইভ আসবে)
+  useEffect(() => {
+    const q = query(
+      collection(db, 'community_messages'),
+      orderBy('createdAt', 'asc'),
+      limit(100)
+    );
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const liveMsgs = snapshot.docs.map((doc) => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setCommunityMsgs(liveMsgs);
+    }, (error) => {
+      console.error("Firestore error:", error);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // LocalStorage সিঙ্ক
   useEffect(() => {
     localStorage.setItem('edunexus_xp', xp.toString());
   }, [xp]);
@@ -149,7 +195,6 @@ export default function App() {
   }, [messages, isTyping]);
 
   useEffect(() => {
-    localStorage.setItem('edunexus_community_chat', JSON.stringify(communityMsgs));
     commEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [communityMsgs]);
 
@@ -167,27 +212,21 @@ export default function App() {
 
   const addXp = (amount) => setXp((prev) => prev + amount);
 
-  // Google Sign-In হ্যান্ডলার
-  const handleGoogleLogin = (e) => {
-    e.preventDefault();
-    if (!loginName.trim() || !loginEmail.trim()) return;
-    const userData = {
-      name: loginName.trim(),
-      email: loginEmail.trim(),
-      avatar: loginName.trim().charAt(0).toUpperCase()
-    };
-    setUser(userData);
-    localStorage.setItem('edunexus_user', JSON.stringify(userData));
-    setShowAuthModal(false);
-    addXp(50);
+  // আসল Google Sign-In ফাংশন
+  const handleGoogleSignIn = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+      addXp(50);
+    } catch (err) {
+      alert("Google Sign-In ত্রুটি: " + err.message + "\n(Firebase Console > Authentication > Authorized domains-এ আপনার Vercel লিংক যোগ করা আছে কি না দেখুন)");
+    }
   };
 
-  const handleLogout = () => {
-    setUser(null);
-    localStorage.removeItem('edunexus_user');
+  const handleLogout = async () => {
+    await signOut(auth);
   };
 
-  // AI Tutor মেসেজ পাঠানো (পূর্বের চ্যাট কনটেক্সটসহ)
+  // AI Tutor মেসেজ পাঠানো
   const handleSendMessage = async (e) => {
     e?.preventDefault();
     if (!inputMsg.trim() || isTyping) return;
@@ -200,7 +239,6 @@ export default function App() {
     setInputMsg('');
     setIsTyping(true);
 
-    // শেষ ৪টি মেসেজ কনটেক্সট হিসেবে পাঠানো যাতে AI আগের কথা মনে রাখতে পারে
     const recentHistory = updatedMessages
       .slice(-5)
       .map((m) => `${m.sender === 'user' ? 'Student' : 'Tutor'}: ${m.text}`)
@@ -249,27 +287,35 @@ export default function App() {
     }
   };
 
-  // Community Chat মেসেজ পাঠানো
-  const handleSendCommunityMsg = (e) => {
+  // লাইভ Firestore Community Chat মেসেজ পাঠানো
+  const handleSendCommunityMsg = async (e) => {
     e.preventDefault();
-    if (!commInput.trim()) return;
+    if (!commInput.trim() || sendingComm) return;
     if (!user) {
-      setShowAuthModal(true);
+      handleGoogleSignIn();
       return;
     }
 
-    const newMsg = {
-      id: Date.now(),
-      user: user.name,
-      text: commInput.trim(),
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      isMe: true
-    };
-    setCommunityMsgs((prev) => [...prev, newMsg]);
+    setSendingComm(true);
+    const textToSend = commInput.trim();
     setCommInput('');
-    addXp(5);
-  };
 
+    try {
+      await addDoc(collection(db, 'community_messages'), {
+        text: textToSend,
+        uid: user.uid,
+        userName: user.displayName || 'Student',
+        userPhoto: user.photoURL || '',
+        createdAt: serverTimestamp(),
+        timeStr: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      });
+      addXp(5);
+    } catch (err) {
+      alert("মেসেজ পাঠানো যায়নি: " + err.message + "\n(Firebase Firestore-এ Test Mode চালু আছে কি না দেখুন)");
+    } finally {
+      setSendingComm(false);
+    }
+  };
   // AI Exam কুইজ তৈরি
   const handleGenerateQuiz = async () => {
     if (!examTopic.trim()) return;
@@ -411,7 +457,6 @@ export default function App() {
     }
   };
 
-  // ডাইনামিক থিম ক্লাস
   const bgMain = darkMode ? 'bg-[#0b0f19] text-slate-100' : 'bg-slate-50 text-slate-900';
   const cardBg = darkMode ? 'bg-[#131a2b] border-slate-800' : 'bg-white border-slate-200 shadow-sm';
   const inputBg = darkMode ? 'bg-[#1a2236] border-slate-700 text-white placeholder-slate-400' : 'bg-slate-100 border-slate-300 text-slate-900';
@@ -427,7 +472,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="font-bold text-base sm:text-lg tracking-tight leading-none">EduNexus AI</h1>
-              <span className="text-[10px] text-indigo-200 font-medium">Smart Study OS</span>
+              <span className="text-[10px] text-indigo-200 font-medium">Live Study OS</span>
             </div>
           </div>
 
@@ -440,94 +485,48 @@ export default function App() {
             <button
               onClick={() => setDarkMode(!darkMode)}
               className="p-1.5 rounded-full bg-white/15 hover:bg-white/25 transition"
-              title="থিম পরিবর্তন করুন"
             >
               {darkMode ? <Sun className="w-4 h-4 text-amber-200" /> : <Moon className="w-4 h-4" />}
             </button>
 
-            {user ? (
-              <div className="flex items-center gap-1.5 bg-white/15 pl-1.5 pr-2 py-1 rounded-full">
-                <div className="w-6 h-6 rounded-full bg-amber-400 text-slate-900 font-bold text-xs flex items-center justify-center">
-                  {user.avatar}
+            {!authLoading && (
+              user ? (
+                <div className="flex items-center gap-1.5 bg-white/15 pl-1.5 pr-2 py-1 rounded-full">
+                  {user.photoURL ? (
+                    <img src={user.photoURL} alt="User" className="w-6 h-6 rounded-full" />
+                  ) : (
+                    <div className="w-6 h-6 rounded-full bg-amber-400 text-slate-900 font-bold text-xs flex items-center justify-center">
+                      {user.displayName?.charAt(0) || 'U'}
+                    </div>
+                  )}
+                  <span className="text-xs font-semibold hidden sm:inline max-w-[85px] truncate">
+                    {user.displayName}
+                  </span>
+                  <button onClick={handleLogout} title="Sign Out" className="text-rose-200 hover:text-white ml-0.5">
+                    <LogOut className="w-3.5 h-3.5" />
+                  </button>
                 </div>
-                <span className="text-xs font-semibold hidden sm:inline max-w-[80px] truncate">{user.name}</span>
-                <button onClick={handleLogout} title="Sign Out" className="text-rose-200 hover:text-white ml-0.5">
-                  <LogOut className="w-3.5 h-3.5" />
+              ) : (
+                <button
+                  onClick={handleGoogleSignIn}
+                  className="bg-white text-indigo-700 hover:bg-indigo-50 px-2.5 py-1 rounded-full text-xs font-bold flex items-center gap-1 shadow transition"
+                >
+                  <LogIn className="w-3.5 h-3.5" />
+                  <span>Google Sign In</span>
                 </button>
-              </div>
-            ) : (
-              <button
-                onClick={() => setShowAuthModal(true)}
-                className="bg-white text-indigo-700 hover:bg-indigo-50 px-2.5 py-1 rounded-full text-xs font-bold flex items-center gap-1 shadow transition"
-              >
-                <LogIn className="w-3.5 h-3.5" />
-                <span>Sign In</span>
-              </button>
+              )
             )}
           </div>
         </div>
       </header>
 
-      {/* Google Account Sign-In পপ-আপ মডাল */}
-      {showAuthModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className={`w-full max-w-sm rounded-2xl border p-5 space-y-4 ${cardBg}`}>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-full bg-indigo-600/20 text-indigo-400 flex items-center justify-center font-bold">
-                  G
-                </div>
-                <div>
-                  <h3 className="font-bold text-base">Google অ্যাকাউন্ট দিয়ে Sign In</h3>
-                  <p className="text-[11px] text-slate-400">আপনার চ্যাট হিস্ট্রি ও নোট সুরক্ষিত রাখুন</p>
-                </div>
-              </div>
-              <button onClick={() => setShowAuthModal(false)} className="text-slate-400 hover:text-white">
-                <XCircle className="w-5 h-5" />
-              </button>
-            </div>
-
-            <form onSubmit={handleGoogleLogin} className="space-y-3">
-              <div>
-                <label className="text-xs font-semibold text-slate-400 block mb-1">আপনার নাম</label>
-                <input
-                  type="text"
-                  required
-                  value={loginName}
-                  onChange={(e) => setLoginName(e.target.value)}
-                  placeholder="যেমন: শিখা দাস"
-                  className={`w-full rounded-xl border px-3.5 py-2.5 text-sm outline-none focus:border-indigo-500 ${inputBg}`}
-                />
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-slate-400 block mb-1">Gmail ঠিকানা</label>
-                <input
-                  type="email"
-                  required
-                  value={loginEmail}
-                  onChange={(e) => setLoginEmail(e.target.value)}
-                  placeholder="example@gmail.com"
-                  className={`w-full rounded-xl border px-3.5 py-2.5 text-sm outline-none focus:border-indigo-500 ${inputBg}`}
-                />
-              </div>
-              <button
-                type="submit"
-                className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 shadow-lg transition"
-              >
-                <UserCheck className="w-4 h-4" /> Continue with Google
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
-
       {/* মূল কনটেন্ট এরিয়া */}
       <main className="flex-1 max-w-3xl w-full mx-auto p-3 pb-24 flex flex-col">
         
-        {/* ট্যাব ১: AI TUTOR (চ্যাট হিস্ট্রিসহ) */}
+        {/* ট্যাব ১: AI TUTOR */}
         {activeTab === 'tutor' && (
           <div className="flex-1 flex flex-col">
-                <div className="flex items-center justify-between mb-2 px-1 gap-2">
+            <div className="flex items-center justify-between mb-2 px-1 gap-2">
               <span className="text-xs font-semibold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
                 <Brain className="w-4 h-4" /> AI Tutor
               </span>
@@ -551,7 +550,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* চ্যাট বক্স */}
             <div className={`flex-1 rounded-2xl border p-3 overflow-y-auto space-y-3 min-h-[58vh] max-h-[62vh] ${cardBg}`}>
               {messages.map((msg) => (
                 <div key={msg.id} className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
@@ -573,13 +571,12 @@ export default function App() {
               {isTyping && (
                 <div className="flex items-center gap-2 text-xs text-indigo-400 px-2 py-1">
                   <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  <span>Gemini 2.5 উত্তর লিখছে...</span>
+                  <span>Gemini AI উত্তর লিখছে...</span>
                 </div>
               )}
               <div ref={chatEndRef} />
             </div>
 
-            {/* মেসেজ ইনপুট */}
             <form onSubmit={handleSendMessage} className="mt-3 flex gap-2">
               <input
                 type="text"
@@ -599,38 +596,48 @@ export default function App() {
           </div>
         )}
 
-        {/* ট্যাব ২: STUDENT COMMUNITY CHAT (ব্যবহারকারীদের চ্যাট বক্স) */}
+        {/* ট্যাব ২: LIVE STUDENT COMMUNITY CHAT (সবার সাথে রিয়েল-টাইম চ্যাট) */}
         {activeTab === 'community' && (
           <div className="flex-1 flex flex-col">
             <div className="flex items-center justify-between mb-2 px-1">
               <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
-                <Users className="w-4 h-4" /> Student Study Group Chat
+                <Users className="w-4 h-4" /> Live Student Community Chat
               </span>
-              <span className="text-[11px] text-slate-400">
-                {user ? `লগইন: ${user.name}` : 'মেসেজ পাঠাতে Sign In করুন'}
+              <span className="text-[11px] text-emerald-400 font-medium">
+                ● Live Connected
               </span>
             </div>
 
             <div className={`flex-1 rounded-2xl border p-3 overflow-y-auto space-y-3 min-h-[58vh] max-h-[62vh] ${cardBg}`}>
-              {communityMsgs.map((m) => (
-                <div key={m.id} className={`flex flex-col ${m.isMe ? 'items-end' : 'items-start'}`}>
-                  <span className="text-[11px] font-semibold text-indigo-400 mb-0.5 px-1">
-                    {m.isMe ? `${m.user} (আপনি)` : m.user}
-                  </span>
-                  <div
-                    className={`max-w-[82%] rounded-2xl px-3.5 py-2 text-sm leading-relaxed ${
-                      m.isMe
-                        ? 'bg-emerald-600 text-white rounded-br-sm'
-                        : darkMode
-                        ? 'bg-[#1e273d] text-slate-100 rounded-bl-sm border border-slate-700/60'
-                        : 'bg-slate-100 text-slate-800 rounded-bl-sm'
-                    }`}
-                  >
-                    {m.text}
-                  </div>
-                  <span className="text-[10px] text-slate-400 mt-0.5 px-1">{m.time}</span>
+              {communityMsgs.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-center text-xs text-slate-400 py-16">
+                  <MessageSquare className="w-8 h-8 text-emerald-400/50 mb-2" />
+                  <p>এখনো কোনো মেসেজ নেই। প্রথম মেসেজ পাঠিয়ে লাইভ আলোচনা শুরু করুন!</p>
                 </div>
-              ))}
+              ) : (
+                communityMsgs.map((m) => {
+                  const isMe = user && m.uid === user.uid;
+                  return (
+                    <div key={m.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
+                      <span className="text-[11px] font-semibold text-indigo-400 mb-0.5 px-1">
+                        {isMe ? `${m.userName} (আপনি)` : m.userName}
+                      </span>
+                      <div
+                        className={`max-w-[82%] rounded-2xl px-3.5 py-2 text-sm leading-relaxed ${
+                          isMe
+                            ? 'bg-emerald-600 text-white rounded-br-sm'
+                            : darkMode
+                            ? 'bg-[#1e273d] text-slate-100 rounded-bl-sm border border-slate-700/60'
+                            : 'bg-slate-100 text-slate-800 rounded-bl-sm'
+                        }`}
+                      >
+                        {m.text}
+                      </div>
+                      <span className="text-[10px] text-slate-400 mt-0.5 px-1">{m.timeStr || ''}</span>
+                    </div>
+                  );
+                })
+              )}
               <div ref={commEndRef} />
             </div>
 
@@ -639,11 +646,12 @@ export default function App() {
                 type="text"
                 value={commInput}
                 onChange={(e) => setCommInput(e.target.value)}
-                placeholder={user ? "গ্রুপে আপনার প্রশ্ন বা নোট শেয়ার করুন..." : "চ্যাট করতে প্রথমে ওপরে Sign In করুন..."}
+                placeholder={user ? "সবার সাথে আপনার প্রশ্ন বা নোট শেয়ার করুন..." : "চ্যাট করতে প্রথমে ওপরে Google Sign In করুন..."}
                 className={`flex-1 rounded-xl border px-4 py-3 text-sm outline-none focus:border-emerald-500 ${inputBg}`}
               />
               <button
                 type="submit"
+                disabled={sendingComm}
                 className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 rounded-xl flex items-center justify-center shadow-lg transition"
               >
                 <Send className="w-5 h-5" />
@@ -694,11 +702,7 @@ export default function App() {
                   <span>প্রশ্ন {currentQIndex + 1} / {quizQuestions.length}</span>
                   <span>স্কোর: {quizScore}</span>
                 </div>
-
-                <h3 className="font-bold text-base leading-snug">
-                  {quizQuestions[currentQIndex].question}
-                </h3>
-
+                <h3 className="font-bold text-base leading-snug">{quizQuestions[currentQIndex].question}</h3>
                 <div className="space-y-2.5">
                   {quizQuestions[currentQIndex].options.map((opt, idx) => {
                     const isCorrect = idx === quizQuestions[currentQIndex].correctIndex;
@@ -706,12 +710,10 @@ export default function App() {
                     let btnStyle = darkMode
                       ? 'bg-[#1a2236] border-slate-700 hover:border-indigo-500'
                       : 'bg-slate-50 border-slate-200 hover:border-indigo-500';
-
                     if (selectedOption !== null) {
                       if (isCorrect) btnStyle = 'bg-emerald-500/20 border-emerald-500 text-emerald-300 font-semibold';
                       else if (isSelected) btnStyle = 'bg-rose-500/20 border-rose-500 text-rose-300';
                     }
-
                     return (
                       <button
                         key={idx}
@@ -726,24 +728,22 @@ export default function App() {
                     );
                   })}
                 </div>
-
                 {selectedOption !== null && (
-                  <div className="p-3.5 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-xs space-y-1">
-                    <p className="font-bold text-indigo-300 flex items-center gap-1">
-                      <Lightbulb className="w-3.5 h-3.5" /> ব্যাখ্যা:
-                    </p>
-                    <p className="leading-relaxed text-slate-300">{quizQuestions[currentQIndex].explanation}</p>
-                  </div>
-                )}
-
-                {selectedOption !== null && (
-                  <button
-                    onClick={handleNextQuestion}
-                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-3 rounded-xl font-semibold text-sm flex items-center justify-center gap-1"
-                  >
-                    <span>{currentQIndex + 1 === quizQuestions.length ? 'ফলাফল দেখুন' : 'পরবর্তী প্রশ্ন'}</span>
-                    <ChevronRight className="w-4 h-4" />
-                  </button>
+                  <>
+                    <div className="p-3.5 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-xs space-y-1">
+                      <p className="font-bold text-indigo-300 flex items-center gap-1">
+                        <Lightbulb className="w-3.5 h-3.5" /> ব্যাখ্যা:
+                      </p>
+                      <p className="leading-relaxed text-slate-300">{quizQuestions[currentQIndex].explanation}</p>
+                    </div>
+                    <button
+                      onClick={handleNextQuestion}
+                      className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-3 rounded-xl font-semibold text-sm flex items-center justify-center gap-1"
+                    >
+                      <span>{currentQIndex + 1 === quizQuestions.length ? 'ফলাফল দেখুন' : 'পরবর্তী প্রশ্ন'}</span>
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                  </>
                 )}
               </div>
             )}
@@ -757,7 +757,7 @@ export default function App() {
                 </p>
                 <button
                   onClick={handleGenerateQuiz}
-                  className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-xl text-sm font-semibold inline-flex items-center gap-1.5"
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-xl xt-sm font-semibold inline-flex items-center gap-1.5"
                 >
                   <RotateCw className="w-4 h-4" /> আবার পরীক্ষা দিন
                 </button>
@@ -773,10 +773,7 @@ export default function App() {
               <h2 className="font-bold text-base flex items-center gap-2 mb-1">
                 <Layers className="w-5 h-5 text-violet-400" /> AI Smart Flashcards
               </h2>
-              <p className="text-xs text-slate-400 mb-3">
-                যেকোনো অধ্যায় বা টপিকের নাম দিন—AI গুরুত্বপূর্ণ সূত্র ও সংজ্ঞার ফ্ল্যাশকার্ড তৈরি করে দেবে।
-              </p>
-              <div className="flex gap-2">
+              <div className="flex gap-2 mt-3">
                 <input
                   type="text"
                   value={flashTopic}
@@ -800,13 +797,11 @@ export default function App() {
                 <div
                   onClick={() => setIsFlipped(!isFlipped)}
                   className={`min-h-[220px] p-6 rounded-2xl border-2 cursor-pointer flex flex-col items-center justify-center text-center transition-all select-none ${
-                    isFlipped
-                      ? 'border-violet-500 bg-violet-600/15'
-                      : `${cardBg} hover:border-violet-500/60`
+                    isFlipped ? 'border-violet-500 bg-violet-600/15' : `${cardBg} hover:border-violet-500/60`
                   }`}
                 >
                   <span className="text-[11px] uppercase tracking-wider font-bold text-violet-400 mb-3">
-                    {isFlipped ? 'উত্তর / ব্যাখ্যা (ফ্লিপ করতে ট্যাপ করুন)' : `কার্ড ${cardIndex + 1} / ${flashcards.length} • প্রশ্ন (উত্তর দেখতে ট্যাপ করুন)`}
+                    {isFlipped ? 'উত্তর / ব্যাখ্যা' : `কার্ড ${cardIndex + 1} / ${flashcards.length} • প্রশ্ন (ট্যাপ করুন)`}
                   </span>
                   <p className="text-base font-semibold leading-relaxed">
                     {isFlipped ? flashcards[cardIndex].back : flashcards[cardIndex].front}
@@ -815,10 +810,7 @@ export default function App() {
 
                 <div className="flex items-center justify-between gap-3">
                   <button
-                    onClick={() => {
-                      setIsFlipped(false);
-                      setCardIndex((prev) => (prev === 0 ? flashcards.length - 1 : prev - 1));
-                    }}
+                    onClick={() => { setIsFlipped(false); setCardIndex((prev) => (prev === 0 ? flashcards.length - 1 : prev - 1)); }}
                     className={`flex-1 py-2.5 rounded-xl border text-sm font-semibold flex items-center justify-center gap-1 ${cardBg}`}
                   >
                     <ChevronLeft className="w-4 h-4" /> আগেরটি
@@ -830,10 +822,7 @@ export default function App() {
                     উল্টান
                   </button>
                   <button
-                    onClick={() => {
-                      setIsFlipped(false);
-                      setCardIndex((prev) => (prev + 1) % flashcards.length);
-                    }}
+                    onClick={() => { setIsFlipped(false); setCardIndex((prev) => (prev + 1) % flashcards.length); }}
                     className={`flex-1 py-2.5 rounded-xl border text-sm font-semibold flex items-center justify-center gap-1 ${cardBg}`}
                   >
                     পরেরটি <ChevronRight className="w-4 h-4" />
@@ -851,10 +840,7 @@ export default function App() {
               <h2 className="font-bold text-base flex items-center gap-2 mb-1">
                 <BookOpen className="w-5 h-5 text-emerald-400" /> AI Study Notes Generator
               </h2>
-              <p className="text-xs text-slate-400 mb-3">
-                পরীক্ষার আগে দ্রুত রিভিশনের জন্য যেকোনো বিষয়ের গোছানো নোট তৈরি ও সেভ করে রাখুন।
-              </p>
-              <div className="flex gap-2">
+              <div className="flex gap-2 mt-3">
                 <input
                   type="text"
                   value={noteTopic}
@@ -873,37 +859,29 @@ export default function App() {
               </div>
             </div>
 
-            {notesList.length === 0 ? (
-              <div className={`p-8 rounded-2xl border text-center text-xs text-slate-400 ${cardBg}`}>
-                এখনো কোনো নোট তৈরি করা হয়নি। ওপরে বিষয়ের নাম লিখে প্রথম নোটটি তৈরি করুন!
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {notesList.map((note) => (
-                  <div key={note.id} className={`p-4 rounded-2xl border space-y-2 ${cardBg}`}>
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <h3 className="font-bold text-base text-emerald-400">{note.title}</h3>
-                        <span className="text-[10px] text-slate-400">{note.date}</span>
-                      </div>
-                      <button
-                        onClick={() => setNotesList((prev) => prev.filter((n) => n.id !== note.id))}
-                        className="text-slate-400 hover:text-rose-400 p-1"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                    <div className="text-sm leading-relaxed whitespace-pre-wrap border-t border-slate-700/40 pt-2">
-                      {note.content}
-                    </div>
+            {notesList.map((note) => (
+              <div key={note.id} className={`p-4 rounded-2xl border space-y-2 ${cardBg}`}>
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <h3 className="font-bold text-base text-emerald-400">{note.title}</h3>
+                    <span className="text-[10px] text-slate-400">{note.date}</span>
                   </div>
-                ))}
+                  <button
+                    onClick={() => setNotesList((prev) => prev.filter((n) => n.id !== note.id))}
+                    className="text-slate-400 hover:text-rose-400 p-1"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="text-sm leading-relaxed whitespace-pre-wrap border-t border-slate-700/40 pt-2">
+                  {note.content}
+                </div>
               </div>
-            )}
+            ))}
           </div>
         )}
 
-        {/* ট্যাব ৬: MISTAKE LOG & DASHBOARD */}
+        {/* ট্যাব ৬: MISTAKE LOG */}
         {activeTab === 'mistakes' && (
           <div className="space-y-4">
             <div className="grid grid-cols-3 gap-2.5">
@@ -924,54 +902,40 @@ export default function App() {
               </div>
             </div>
 
-            {mistakes.length === 0 ? (
-                          <div className={`p-8 rounded-2xl border text-center text-xs text-slate-400 ${cardBg}`}>
-                এখনো কোনো ভুল প্রশ্ন জমা নেই। Exam ট্যাবে গিয়ে মক টেস্ট দিলে ভুল উত্তরগুলো এখানে চলে আসবে।
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {mistakes.map((m) => (
-                  <div key={m.id} className={`p-4 rounded-2xl border space-y-2.5 ${cardBg}`}>
-                    <div className="flex items-center justify-between">
-                      <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-rose-500/15 text-rose-400">
-                        {m.topic}
-                      </span>
-                      <button
-                        onClick={() => setMistakes((prev) => prev.filter((item) => item.id !== m.id))}
-                        className="text-slate-400 hover:text-rose-400"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                    <p className="font-semibold text-sm">{m.question}</p>
-                    <div className="text-xs space-y-1">
-                      <p className="text-rose-400">❌ আপনার উত্তর: {m.yourAnswer}</p>
-                      <p className="text-emerald-400">✅ সঠিক উত্তর: {m.correctAnswer}</p>
-                    </div>
-
-                    {m.aiDeepDive ? (
-                      <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-xs leading-relaxed whitespace-pre-wrap">
-                        {m.aiDeepDive}
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => handleExplainMistake(m)}
-                        disabled={explainingId === m.id}
-                        className="text-xs bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg font-medium inline-flex items-center gap-1.5"
-                      >
-                        {explainingId === m.id ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-                        <span>AI দিয়ে বিস্তারিত বুঝুন</span>
-                      </button>
-                    )}
+            {mistakes.map((m) => (
+              <div key={m.id} className={`p-4 rounded-2xl border space-y-2.5 ${cardBg}`}>
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-rose-500/15 text-rose-400">{m.topic}</span>
+                  <button onClick={() => setMistakes((prev) => prev.filter((item) => item.id !== m.id))} className="text-slate-400 hover:text-rose-400">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+                <p className="font-semibold text-sm">{m.question}</p>
+                <div className="text-xs space-y-1">
+                  <p className="text-rose-400">❌ আপনার উত্তর: {m.yourAnswer}</p>
+                  <p className="text-emerald-400">✅ সঠিক উত্তর: {m.correctAnswer}</p>
+                </div>
+                {m.aiDeepDive ? (
+                  <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-xs leading-relaxed whitespace-pre-wrap">
+                    {m.aiDeepDive}
                   </div>
-                ))}
+                ) : (
+                  <button
+                    onClick={() => handleExplainMistake(m)}
+                    disabled={explainingId === m.id}
+                    className="text-xs bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg font-medium inline-flex items-center gap-1.5"
+                  >
+                    {explainingId === m.id ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                    <span>AI দিয়ে বিস্তারিত বুঝুন</span>
+                  </button>
+                )}
               </div>
-            )}
+            ))}
           </div>
         )}
       </main>
 
-      {/* বটম নেভিগেশন বার (৬টি সম্পূর্ণ ফিচার ট্যাব) */}
+      {/* বটম নেভিগেশন বার */}
       <nav className={`fixed bottom-0 inset-x-0 z-30 border-t backdrop-blur-md ${darkMode ? 'bg-[#0f1524]/95 border-slate-800' : 'bg-white/95 border-slate-200'}`}>
         <div className="max-w-3xl mx-auto grid grid-cols-6 py-1.5">
           {[
