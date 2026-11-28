@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "app.vercel.edunexus_ai_khup.twa",
+      "sha256_cert_fingerprints": [
+        "B8:A4:88:F5:A2:C0:BE:A5:E4:00:96:7F:02:37:DB:89:42:66:1B:07:37:17:07:AB:7B:26:94:E0:3B:2B:96:31"
+      ]
+    }
+  }
+]
