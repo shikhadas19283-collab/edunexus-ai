@@ -1,7 +1,7 @@
 {
   "name": "EduNexus AI Study Platform",
   "short_name": "EduNexus AI",
-  "description": "All-in-One AI Study, Group Chat & Live Exam Simulator",
+  "description": "All-in-One AI Study, Group Chat & Learning Platform",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0f172a",
@@ -9,13 +9,13 @@
   "orientation": "portrait",
   "icons": [
     {
-      "src": "https://cdn-icons-png.flaticon.com/512/4712/4712035.png",
+      "src": "/logo.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any maskable"
     },
     {
-      "src": "https://cdn-icons-png.flaticon.com/512/4712/4712035.png",
+      "src": "/logo.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"
