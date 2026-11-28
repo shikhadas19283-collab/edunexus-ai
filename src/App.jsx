@@ -2,11 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   Sparkles, Send, Brain, Trophy, Sun, Moon, BookOpen,
   Layers, CheckCircle2, XCircle, Trash2, Zap, Award,
-  Flame, HelpCircle, RefreshCw, Users, LogIn, LogOut,
+  HelpCircle, RefreshCw, Users, LogIn, LogOut,
   MessageSquare, Image as ImageIcon, Shield, UserCheck,
   Bell, BellRing, Video, ClipboardCheck, Edit3, Camera, Lock, Check,
   X, Mic, Volume2, Pin, BarChart2, Clock, Play, Pause, RotateCcw,
-  FileCheck, AlertTriangle, Copy, Medal
+  FileCheck, AlertTriangle, Copy, Medal, Calendar, Reply, Plus,
+  CheckSquare, FolderOpen, Target, ExternalLink
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import {
@@ -17,6 +18,7 @@ import {
   getFirestore, collection, addDoc, setDoc, updateDoc, deleteDoc,
   doc, query, onSnapshot, serverTimestamp, where, arrayUnion
 } from 'firebase/firestore';
+import { getMessaging, getToken, onMessage } from 'firebase/messaging';
 
 const HOST_EMAILS = [
   'shifasarker825@gmail.com',
@@ -37,6 +39,10 @@ const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
 const googleProvider = new GoogleAuthProvider();
+let messaging = null;
+try {
+  messaging = getMessaging(firebaseApp);
+} catch {}
 const playNotificationTone = () => {
   try {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
@@ -64,6 +70,7 @@ const triggerDeviceNotification = async (title, body) => {
         await reg.showNotification(title, {
           body,
           icon: 'https://cdn-icons-png.flaticon.com/512/4712/4712035.png',
+          badge: 'https://cdn-icons-png.flaticon.com/512/4712/4712035.png',
           vibrate: [200, 100, 200]
         });
         return;
@@ -93,7 +100,8 @@ const cleanAiOutput = (rawText) => {
     .replace(/\\times/g, '×')
     .replace(/\\div/g, '÷')
     .replace(/\\pm/g, '±')
-    .replace(/\\sqrt\{([^}]+)\}/g, '√($1)') .replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g, '($1 / $2)')
+    .replace(/\\sqrt\{([^}]+)\}/g, '√($1)')
+    .replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g, '($1 / $2)')
     .replace(/^#{1,6}\s*/gm, '▸ ')
     .replace(/\*\*([^*]+)\*\*/g, '$1')
     .replace(/\*([^*]+)\*/g, '$1')
@@ -101,17 +109,24 @@ const cleanAiOutput = (rawText) => {
   return text.trim();
 };
 
-const compressImageToBase64 = (file, maxWidth = 700, quality = 0.65) => {
+const compressImageToBase64 = (file, maxWidth = 650, quality = 0.65) => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.readAsDataURL(file);
-    reader.onload = (event) => {
-      const img = new Image();
-      img.src = event.target.result;
-      img.onload = () => {
+    reader.onload = async (event) => {
+      try {
+        const img = new Image();
+        img.src = event.target.result;
+        if (img.decode) {
+          await img.decode();
+        } else {
+          await new Promise((res, rej) => {
+            img.onload = res;
+            img.onerror = rej;
+          });
+        }
         const canvas = document.createElement('canvas');
-        let width = img.width;
-        let height = img.height;
+        let width = img.naturalWidth || img.width;
+        let height = img.naturalHeight || img.height;
         if (width > maxWidth) {
           height = Math.round((height * maxWidth) / width);
           width = maxWidth;
@@ -119,12 +134,16 @@ const compressImageToBase64 = (file, maxWidth = 700, quality = 0.65) => {
         canvas.width = width;
         canvas.height = height;
         const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
         ctx.drawImage(img, 0, 0, width, height);
         resolve(canvas.toDataURL('image/jpeg', quality));
-      };
-      img.onerror = (err) => reject(err);
+      } catch (err) {
+        reject(err);
+      }
     };
     reader.onerror = (err) => reject(err);
+    reader.readAsDataURL(file);
   });
 };
 
@@ -140,16 +159,24 @@ const callGeminiFast = async (prompt, systemInstruction = "", base64Image = null
     : `${systemInstruction} গুরুত্বপূর্ণ নিয়ম: কোনো উত্তরে Markdown (**, ###) বা LaTeX ($, $$) চিহ্ন ব্যবহার করবে না। গণিতের সূত্র সাধারণ টেক্সট ও ইউনিকোড চিহ্নে (যেমন: a² - b², ×, ÷, √) লিখবে। বাংলা শব্দের বানান শতভাগ শুদ্ধ রাখবে, বাংলার ভেতর ইংরেজি অক্ষর মেশাবে না।`;
 
   const parts = [{ text: prompt }];
-  if (base64Image) {
-    const cleanBase64 = base64Image.split(',')[1];
-    const mimeType = base64Image.split(';')[0].split(':')[1] || 'image/jpeg';
-    parts.push({ inlineData: { mimeType, data: cleanBase64 } });
-  }
+  const imageList = Array.isArray(base64Image)
+    ? base64Image
+    : base64Image
+    ? [base64Image]
+    : [];
+
+  imageList.forEach((imgStr) => {
+    if (imgStr && imgStr.includes(',')) {
+      const cleanBase64 = imgStr.split(',')[1];
+      const mimeType = imgStr.split(';')[0].split(':')[1] || 'image/jpeg';
+      parts.push({ inlineData: { mimeType, data: cleanBase64 } });
+    }
+  });
 
   let lastError = "";
   for (const model of models) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
       const payload = {
@@ -179,6 +206,12 @@ const callGeminiFast = async (prompt, systemInstruction = "", base64Image = null
 export default function App() {
   const [darkMode, setDarkMode] = useState(true);
   const [activeTab, setActiveTab] = useState('tutor');
+  const [toastMsg, setToastMsg] = useState('');
+
+  const showToast = (msg) => {
+    setToastMsg(msg);
+    setTimeout(() => setToastMsg(''), 3500);
+  };
 
   const [user, setUser] = useState(null);
   const [userProfile, setUserProfile] = useState(null);
@@ -191,7 +224,6 @@ export default function App() {
   const lastSeenNoticeTimeRef = useRef(Date.now());
 
   const [xp, setXp] = useState(() => Number(localStorage.getItem('edunexus_xp')) || 150);
-  const [streak] = useState(() => Number(localStorage.getItem('edunexus_streak')) || 3);
   const [timerSeconds, setTimerSeconds] = useState(25 * 60);
   const [timerRunning, setTimerRunning] = useState(false);
 
@@ -200,7 +232,7 @@ export default function App() {
     {
       id: 1,
       sender: 'ai',
-      text: 'স্বাগতম! আমি EduNexus AI। প্রশ্ন লিখতে পারো, মাইক চেপে মুখে বলতে পারো অথবা অঙ্কের ছবি তুলে পাঠালেই আমি সমাধান করে দেব!',
+      text: 'স্বাগতম! আমি EduNexus AI। প্রশ্ন লিখতে পারো, মাইক চেপে মুখে বলতে পারো অথবা একসাথে একাধিক অঙ্কের ছবি পাঠালেই আমি সমাধান করে দেব!',
       time: 'Now'
     }
   ];
@@ -209,7 +241,7 @@ export default function App() {
     return saved ? JSON.parse(saved) : defaultWelcomeMsg;
   });
   const [inputMsg, setInputMsg] = useState('');
-  const [tutorImage, setTutorImage] = useState(null);
+  const [tutorImages, setTutorImages] = useState([]);
   const [isTyping, setIsTyping] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const chatEndRef = useRef(null);
@@ -224,7 +256,8 @@ export default function App() {
 
   const [groupMsgs, setGroupMsgs] = useState([]);
   const [commInput, setCommInput] = useState('');
-  const [commImage, setCommImage] = useState(null);
+  const [commImages, setCommImages] = useState([]);
+  const [replyToMsg, setReplyToMsg] = useState(null);
   const [sendingComm, setSendingComm] = useState(false);
   const commEndRef = useRef(null);
 
@@ -235,6 +268,13 @@ export default function App() {
   const [pollQuestion, setPollQuestion] = useState('');
   const [pollOpt1, setPollOpt1] = useState('');
   const [pollOpt2, setPollOpt2] = useState('');
+
+  const [routines, setRoutines] = useState([]);
+  const [routineForm, setRoutineForm] = useState({ day: 'শনিবার', time: '', subject: '', liveLink: '' });
+
+  // নতুন ফিচার: PDF ও স্টাডি রিসোর্স লাইব্রেরি
+  const [resources, setResources] = useState([]);
+  const [resForm, setResForm] = useState({ title: '', subject: '', url: '' });
 
   const [homeworks, setHomeworks] = useState([]);
   const [hwTitle, setHwTitle] = useState('');
@@ -274,32 +314,75 @@ export default function App() {
   const [isFlipped, setIsFlipped] = useState(false);
   const [loadingFlash, setLoadingFlash] = useState(false);
 
-  // নতুন ফিচার স্টেট: AI Notes জেনারেটর ও Mistake Log
   const [noteTopic, setNoteTopic] = useState('');
+  const [noteType, setNoteType] = useState('short_note');
   const [generatedNote, setGeneratedNote] = useState('');
   const [loadingNote, setLoadingNote] = useState(false);
+
   const [mistakes, setMistakes] = useState(() => {
     const saved = localStorage.getItem('edunexus_mistakes');
     return saved ? JSON.parse(saved) : [];
   });
   const [explainingMistakeId, setExplainingMistakeId] = useState(null);
 
+  const [todos, setTodos] = useState(() => {
+    const saved = localStorage.getItem('edunexus_todos');
+    return saved ? JSON.parse(saved) : [
+      { id: 1, text: 'আজকের ক্লাস নোট রিভিশন করা', done: false }
+    ];
+  });
+  const [todoInput, setTodoInput] = useState('');
+
+  // নতুন ফিচার: পরীক্ষার কাউন্টডাউন ও AI স্টাডি প্ল্যানার
+  const [targetExam, setTargetExam] = useState(() => {
+    const saved = localStorage.getItem('edunexus_target_exam');
+    return saved ? JSON.parse(saved) : { name: 'বোর্ড পরীক্ষা', date: '' };
+  });
+  const [studyPlan, setStudyPlan] = useState('');
+  const [loadingPlan, setLoadingPlan] = useState(false);
+
   const isHost = user && HOST_EMAILS.includes(user.email?.toLowerCase());
   const currentRole = isHost ? 'host' : (userProfile?.role || 'student');
   const isTeacherOrHost = currentRole === 'host' || currentRole === 'teacher';
+  // লক-স্ক্রিন ও হোম-স্ক্রিন পুশ নোটিফিকেশন (FCM) চালু করা
   const handleEnableNotifications = async () => {
     if (!('Notification' in window)) {
-      alert("আপনার ব্রাউজারে নোটিফিকেশন সমর্থিত নয়। Chrome ব্যবহার করুন বা অ্যাপটি হোম স্ক্রিনে Install করুন।");
+      showToast("এই ব্রাউজারে নোটিফিকেশন সমর্থিত নয়। Chrome ব্যবহার করুন।");
       return;
     }
     const perm = await Notification.requestPermission();
     setNotifPermission(perm);
     if (perm === 'granted') {
-      triggerDeviceNotification('EduNexus AI নোটিফিকেশন চালু হয়েছে!', 'এখন থেকে নতুন ক্লাস নোটিশ এলেই আপনি অ্যালার্ট পাবেন।');
+      try {
+        if (messaging && import.meta.env.VITE_FIREBASE_VAPID_KEY) {
+          const swReg = await navigator.serviceWorker.register('/firebase-messaging-sw.js');
+          const token = await getToken(messaging, {
+            vapidKey: import.meta.env.VITE_FIREBASE_VAPID_KEY,
+            serviceWorkerRegistration: swReg
+          });
+          if (token && user) {
+            await updateDoc(doc(db, 'users', user.uid), { fcmToken: token });
+          }
+        }
+      } catch {}
+      triggerDeviceNotification('EduNexus AI নোটিফিকেশন চালু!', 'এখন থেকে লক স্ক্রিন ও হোম স্ক্রিনে নতুন নোটিশ আসবে।');
+      showToast("🔔 নোটিফিকেশন সফলভাবে চালু হয়েছে!");
     } else {
-      alert("নোটিফিকেশন চালু করতে ব্রাউজার সেটিংস থেকে Allow দিন।");
+      showToast("নোটিফিকেশন চালু করতে ব্রাউজার সেটিংস থেকে Allow দিন।");
     }
   };
+
+  useEffect(() => {
+    if (!messaging) return;
+    try {
+      return onMessage(messaging, (payload) => {
+        const title = payload.notification?.title || 'EduNexus AI নোটিশ';
+        const body = payload.notification?.body || 'নতুন আপডেট এসেছে!';
+        triggerDeviceNotification(title, body);
+        showToast(`🔔 ${title}`);
+      });
+    } catch {}
+  }, []);
 
   useEffect(() => {
     if (!timerRunning) return;
@@ -403,6 +486,18 @@ export default function App() {
       setPolls(list);
     });
 
+    const unsubRoutines = onSnapshot(query(collection(db, 'group_routines'), where('groupId', '==', gid)), (s) => {
+      const list = s.docs.map(d => ({ id: d.id, ...d.data() }));
+      list.sort((a, b) => (a.clientTime || 0) - (b.clientTime || 0));
+      setRoutines(list);
+    });
+
+    const unsubResources = onSnapshot(query(collection(db, 'group_resources'), where('groupId', '==', gid)), (s) => {
+      const list = s.docs.map(d => ({ id: d.id, ...d.data() }));
+      list.sort((a, b) => (b.clientTime || 0) - (a.clientTime || 0));
+      setResources(list);
+    });
+
     const unsubHw = onSnapshot(query(collection(db, 'group_homeworks'), where('groupId', '==', gid)), (s) => {
       const list = s.docs.map(d => ({ id: d.id, ...d.data() }));
       list.sort((a, b) => (b.clientTime || 0) - (a.clientTime || 0));
@@ -428,15 +523,13 @@ export default function App() {
     });
 
     return () => {
-      unsubChat(); unsubNotices(); unsubPolls(); unsubHw();
-      unsubAtt(); unsubExams(); unsubClasses();
+      unsubChat(); unsubNotices(); unsubPolls(); unsubRoutines(); unsubResources();
+      unsubHw(); unsubAtt(); unsubExams(); unsubClasses();
     };
   }, [selectedGroupId]);
   useEffect(() => {
     localStorage.setItem('edunexus_xp', xp.toString());
-    if (user) {
-      updateDoc(doc(db, 'users', user.uid), { xp }).catch(() => {});
-    }
+    if (user) updateDoc(doc(db, 'users', user.uid), { xp }).catch(() => {});
   }, [xp, user]);
 
   useEffect(() => {
@@ -448,13 +541,10 @@ export default function App() {
     commEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [groupMsgs]);
 
-  useEffect(() => {
-    localStorage.setItem('edunexus_flashcards', JSON.stringify(flashcards));
-  }, [flashcards]);
-
-  useEffect(() => {
-    localStorage.setItem('edunexus_mistakes', JSON.stringify(mistakes));
-  }, [mistakes]);
+  useEffect(() => { localStorage.setItem('edunexus_flashcards', JSON.stringify(flashcards)); }, [flashcards]);
+  useEffect(() => { localStorage.setItem('edunexus_mistakes', JSON.stringify(mistakes)); }, [mistakes]);
+  useEffect(() => { localStorage.setItem('edunexus_todos', JSON.stringify(todos)); }, [todos]);
+  useEffect(() => { localStorage.setItem('edunexus_target_exam', JSON.stringify(targetExam)); }, [targetExam]);
 
   const addXp = (amount) => setXp((prev) => prev + amount);
 
@@ -462,21 +552,17 @@ export default function App() {
     try {
       await signInWithPopup(auth, googleProvider);
       addXp(50);
+      showToast("সফলভাবে লগইন হয়েছে! +50 XP");
     } catch (err) {
-      alert("Google Sign-In ত্রুটি: " + err.message);
+      showToast("Sign-In ত্রুটি: " + err.message);
     }
   };
 
-  const handleLogout = async () => {
-    await signOut(auth);
-  };
+  const handleLogout = async () => { await signOut(auth); showToast("সাইন আউট সম্পন্ন হয়েছে।"); };
 
   const handleVoiceInput = () => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      alert("আপনার ব্রাউজারে ভয়েস টাইপিং সমর্থিত নয়। Chrome ব্যবহার করুন।");
-      return;
-    }
+    if (!SpeechRecognition) { showToast("ভয়েস টাইপিংয়ের জন্য Chrome ব্যবহার করুন।"); return; }
     const recognition = new SpeechRecognition();
     recognition.lang = 'bn-BD';
     recognition.onstart = () => setIsListening(true);
@@ -497,34 +583,31 @@ export default function App() {
   };
 
   const handleTutorImageUpload = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const compressed = await compressImageToBase64(file, 800, 0.7);
-    setTutorImage(compressed);
+    const files = Array.from(e.target.files || []).slice(0, 4);
+    if (files.length === 0) return;
+    const compressedList = await Promise.all(files.map((f) => compressImageToBase64(f, 700, 0.65)));
+    setTutorImages((prev) => [...prev, ...compressedList].slice(0, 4));
+    e.target.value = '';
   };
 
   const handleSendMessage = async (e) => {
     e?.preventDefault();
-    if ((!inputMsg.trim() && !tutorImage) || isTyping) return;
+    if ((!inputMsg.trim() && tutorImages.length === 0) || isTyping) return;
 
-    const userText = inputMsg.trim() || "এই ছবির প্রশ্ন বা অঙ্কটি ধাপে ধাপে সমাধান করে বুঝিয়ে দাও।";
-    const imageToSend = tutorImage;
+    const userText = inputMsg.trim() || "এই ছবিগুলোর প্রশ্ন বা অঙ্ক ধাপে ধাপে সমাধান করে বুঝিয়ে দাও।";
+    const imagesToSend = [...tutorImages];
     const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
     const updatedMessages = [
       ...messages,
-      { id: Date.now(), sender: 'user', text: userText, image: imageToSend, time: now }
+      { id: Date.now(), sender: 'user', text: userText, images: imagesToSend, time: now }
     ];
     setMessages(updatedMessages);
     setInputMsg('');
-    setTutorImage(null);
+    setTutorImages([]);
     setIsTyping(true);
 
-    const recentHistory = updatedMessages
-      .slice(-4)
-      .map((m) => `${m.sender === 'user' ? 'Student' : 'Tutor'}: ${m.text}`)
-      .join('\n');
-
+    const recentHistory = updatedMessages.slice(-4).map((m) => `${m.sender === 'user' ? 'Student' : 'Tutor'}: ${m.text}`).join('\n');
     const systemPrompts = {
       'Friendly Tutor': 'তুমি একজন বন্ধুত্বপূর্ণ শিক্ষক। সহজ ও শুদ্ধ বাংলায় উদাহরণসহ স্পষ্টভাবে উত্তর দাও।',
       'Exam Coach': 'তুমি একজন বোর্ড পরীক্ষার কোচ। পরীক্ষায় পুরো নম্বর পাওয়ার উপযোগী পয়েন্ট আকারে শুদ্ধ বাংলায় উত্তর দাও।',
@@ -535,24 +618,13 @@ export default function App() {
       const reply = await callGeminiFast(
         `আগের কথোপকথন:\n${recentHistory}\n\nবর্তমান প্রশ্ন: ${userText}`,
         systemPrompts[tutorMode],
-        imageToSend,
+        imagesToSend,
         false
       );
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now() + 1,
-          sender: 'ai',
-          text: reply,
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        }
-      ]);
+      setMessages((prev) => [...prev, { id: Date.now() + 1, sender: 'ai', text: reply, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }]);
       addXp(15);
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        { id: Date.now() + 1, sender: 'ai', text: `⚠️ ${err.message}`, time: now }
-      ]);
+      setMessages((prev) => [...prev, { id: Date.now() + 1, sender: 'ai', text: `⚠️ ${err.message}`, time: now }]);
     } finally {
       setIsTyping(false);
     }
@@ -568,41 +640,70 @@ export default function App() {
   const handleGenerateNotes = async () => {
     if (!noteTopic.trim()) return;
     setLoadingNote(true);
+    const promptMap = {
+      short_note: `"${noteTopic}" বিষয়ের ওপর পরীক্ষার প্রস্তুতির জন্য একটি গোছানো শর্ট নোট তৈরি করো।`,
+      formula_sheet: `"${noteTopic}" অধ্যায়ের সব গুরুত্বপূর্ণ গাণিতিক বা বৈজ্ঞানিক সূত্র তালিকা আকারে লেখো।`,
+      essay: `"${noteTopic}" বিষয়ের ওপর পরীক্ষার উপযোগী একটি সুন্দর রচনা বা অনুচ্ছেদ লেখো।`
+    };
     try {
-      const reply = await callGeminiFast(
-        `"${noteTopic}" বিষয়ের ওপর পরীক্ষার প্রস্তুতির জন্য একটি গোছানো শর্ট নোট তৈরি করো (মূল সংজ্ঞা, গুরুত্বপূর্ণ সূত্র ও ৩টি সংক্ষিপ্ত প্রশ্নোত্তরসহ)।`,
-        "তুমি একজন অভিজ্ঞ শিক্ষক। স্পষ্ট পয়েন্ট আকারে শুদ্ধ বাংলায় শর্ট নোট তৈরি করো।"
-      );
+      const reply = await callGeminiFast(promptMap[noteType], "তুমি একজন অভিজ্ঞ শিক্ষক। স্পষ্ট পয়েন্ট আকারে শুদ্ধ বাংলায় উত্তর তৈরি করো।");
       setGeneratedNote(reply);
       addXp(25);
-    } catch (err) {
-      alert(err.message);
-    } finally {
-      setLoadingNote(false);
-    }
+    } catch (err) { showToast(err.message); } finally { setLoadingNote(false); }
+  };
+
+  const handleGenerateStudyPlan = async () => {
+    if (!targetExam.name.trim()) return;
+    setLoadingPlan(true);
+    const daysLeft = targetExam.date ? Math.max(1, Math.ceil((new Date(targetExam.date) - new Date()) / (1000 * 60 * 60 * 24))) : 30;
+    try {
+      const plan = await callGeminiFast(
+        `আমার "${targetExam.name}" পরীক্ষার আর মাত্র ${daysLeft} দিন বাকি। আমাকে একটি বাস্তবসম্মত দৈনিক স্টাডি রুটিন ও প্রস্তুতি গাইডলাইন তৈরি করে দাও।`,
+        "তুমি একজন দক্ষ স্টাডি কোচ। সংক্ষেপে ও স্পষ্ট পয়েন্ট আকারে শুদ্ধ বাংলায় গাইডলাইন দাও।"
+      );
+      setStudyPlan(plan);
+      addXp(20);
+    } catch (err) { showToast(err.message); } finally { setLoadingPlan(false); }
   };
 
   const handleExplainMistake = async (m) => {
     setExplainingMistakeId(m.id);
     try {
       const exp = await callGeminiFast(
-        `প্রশ্ন: "${m.question}"। শিক্ষার্থী ভুল করে "${m.yourAnswer}" দিয়েছে, সঠিক উত্তর "${m.correctAnswer}"। কেন সঠিক উত্তরটি ঠিক তা ২-৩ লাইনে খুব সহজে বুঝিয়ে দাও।`,
+        `প্রশ্ন: "${m.question}"। ভুল উত্তর "${m.yourAnswer}", সঠিক উত্তর "${m.correctAnswer}"। কেন সঠিক উত্তরটি ঠিক তা ২-৩ লাইনে সহজে বুঝিয়ে দাও।`,
         "সহজ ও বন্ধুত্বপূর্ণ বাংলায় ব্যাখ্যা দাও।"
       );
       setMistakes(prev => prev.map(item => item.id === m.id ? { ...item, explanation: exp } : item));
-    } finally {
-      setExplainingMistakeId(null);
-    }
+    } finally { setExplainingMistakeId(null); }
   };
+
+  const handleAddTodo = (e) => {
+    e.preventDefault();
+    if (!todoInput.trim()) return;
+    setTodos(prev => [{ id: Date.now(), text: todoInput.trim(), done: false }, ...prev]);
+    setTodoInput('');
+  };
+
+  const handleToggleTodo = (id) => {
+    setTodos(prev => prev.map(t => {
+      if (t.id === id) {
+        if (!t.done) { addXp(15); showToast("টার্গেট সম্পন্ন! +15 XP"); }
+        return { ...t, done: !t.done };
+      }
+      return t;
+    }));
+  };
+
   const handleRequestTeacher = async () => {
     if (!user) return;
     await updateDoc(doc(db, 'users', user.uid), { teacherRequest: true });
-    alert("আপনার Teacher হওয়ার আবেদন Host-এর কাছে পাঠানো হয়েছে!");
+    showToast("Teacher আবেদন Host-এর কাছে পাঠানো হয়েছে!");
   };
 
   const handleToggleUserRole = async (targetUser, newRole) => {
     if (!isHost) return;
     await updateDoc(doc(db, 'users', targetUser.uid), { role: newRole, teacherRequest: false });
+    showToast(`${targetUser.displayName}-কে ${newRole.toUpperCase()} করা হয়েছে!`);
   };
 
   const handleCreateGroup = async (e) => {
@@ -619,128 +720,130 @@ export default function App() {
       createdAt: serverTimestamp()
     });
     await updateDoc(doc(db, 'users', user.uid), { joinedGroups: arrayUnion(docRef.id) });
-    setNewGroupName('');
-    setNewGroupSubject('');
-    setSelectedGroupId(docRef.id);
-    alert(`নতুন গ্রুপ তৈরি হয়েছে! স্টুডেন্টদের জয়েন কোড: ${code}`);
+    setNewGroupName(''); setNewGroupSubject(''); setSelectedGroupId(docRef.id);
+    showToast(`নতুন গ্রুপ তৈরি হয়েছে! কোড: ${code}`);
   };
 
   const handleJoinGroupByCode = async (e) => {
     e.preventDefault();
     if (!user || !joinCodeInput.trim()) return;
     const found = groups.find(g => g.inviteCode === joinCodeInput.trim().toUpperCase());
-    if (!found) {
-      alert("ভুল ইনভাইট কোড! টিচারের কাছ থেকে সঠিক কোড নিন।");
-      return;
-    }
+    if (!found) { showToast("ভুল ইনভাইট কোড!"); return; }
     await updateDoc(doc(db, 'study_groups', found.id), { members: arrayUnion(user.uid) });
     await updateDoc(doc(db, 'users', user.uid), { joinedGroups: arrayUnion(found.id) });
-    setSelectedGroupId(found.id);
-    setJoinCodeInput('');
-    alert(`আপনি "${found.name}" গ্রুপে যুক্ত হয়েছেন!`);
+    setSelectedGroupId(found.id); setJoinCodeInput('');
+    showToast(`"${found.name}" গ্রুপে যুক্ত হয়েছেন!`);
   };
 
   const handleCommImageSelect = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const compressed = await compressImageToBase64(file, 650, 0.6);
-    setCommImage(compressed);
+    const files = Array.from(e.target.files || []).slice(0, 4);
+    if (files.length === 0) return;
+    const compressedList = await Promise.all(files.map((f) => compressImageToBase64(f, 550, 0.5)));
+    setCommImages((prev) => [...prev, ...compressedList].slice(0, 4));
+    e.target.value = '';
   };
 
   const handleSendGroupMsg = async (e) => {
     e.preventDefault();
-    if ((!commInput.trim() && !commImage) || sendingComm) return;
+    if ((!commInput.trim() && commImages.length === 0) || sendingComm) return;
     if (!user) { handleGoogleSignIn(); return; }
     setSendingComm(true);
     const textToSend = commInput.trim();
-    const imgToSend = commImage;
-    setCommInput('');
-    setCommImage(null);
+    const imgsToSend = [...commImages];
+    const replyData = replyToMsg ? { name: replyToMsg.userName, text: replyToMsg.text || '📷 ছবি' } : null;
+    setCommInput(''); setCommImages([]); setReplyToMsg(null);
     try {
       await addDoc(collection(db, 'group_messages'), {
-        groupId: selectedGroupId,
-        text: textToSend,
-        image: imgToSend || '',
-        uid: user.uid,
-        userName: userProfile?.displayName || user.displayName || 'Student',
-        userPhoto: userProfile?.photoURL || user.photoURL || '',
-        senderRole: currentRole,
-        pinned: false,
-        likes: [],
-        clientTime: Date.now(),
+        groupId: selectedGroupId, text: textToSend, images: imgsToSend, image: imgsToSend[0] || '',
+        replyTo: replyData, uid: user.uid, userName: userProfile?.displayName || user.displayName || 'Student',
+        userPhoto: userProfile?.photoURL || user.photoURL || '', senderRole: currentRole,
+        pinned: false, likes: [], clientTime: Date.now(),
         timeStr: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       });
       addXp(5);
-    } finally {
-      setSendingComm(false);
-    }
+    } catch { showToast("ছবি বড় হওয়ায় পাঠানো যায়নি, ১-২টি করে পাঠান।"); } finally { setSendingComm(false); }
   };
 
-  const handleTogglePinMsg = async (msg) => {
-    if (!isTeacherOrHost) return;
-    await updateDoc(doc(db, 'group_messages', msg.id), { pinned: !msg.pinned });
-  };
-
+  const handleTogglePinMsg = async (msg) => { if (isTeacherOrHost) await updateDoc(doc(db, 'group_messages', msg.id), { pinned: !msg.pinned }); };
   const handleLikeMsg = async (msg) => {
     if (!user) return;
     const currentLikes = msg.likes || [];
-    const updated = currentLikes.includes(user.uid)
-      ? currentLikes.filter(id => id !== user.uid)
-      : [...currentLikes, user.uid];
+    const updated = currentLikes.includes(user.uid) ? currentLikes.filter(id => id !== user.uid) : [...currentLikes, user.uid];
     await updateDoc(doc(db, 'group_messages', msg.id), { likes: updated });
   };
 
+  // নোটিশ প্রকাশ + লক-স্ক্রিন পুশ নোটিফিকেশন ট্রিগার
   const handlePostNotice = async (e) => {
     e.preventDefault();
     if (!isTeacherOrHost || !noticeTitle.trim() || !noticeBody.trim()) return;
+    const titleStr = noticeTitle.trim();
+    const bodyStr = noticeBody.trim();
     await addDoc(collection(db, 'group_notices'), {
-      groupId: selectedGroupId,
-      title: noticeTitle.trim(),
-      body: noticeBody.trim(),
-      authorName: userProfile?.displayName || user.displayName,
-      authorRole: currentRole,
-      clientTime: Date.now(),
-      dateStr: new Date().toLocaleDateString('bn-BD')
+      groupId: selectedGroupId, title: titleStr, body: bodyStr,
+      authorName: userProfile?.displayName || user.displayName, authorRole: currentRole,
+      clientTime: Date.now(), dateStr: new Date().toLocaleDateString('bn-BD')
     });
-    setNoticeTitle('');
-    setNoticeBody('');
+    setNoticeTitle(''); setNoticeBody('');
+    showToast("📢 নোটিশ প্রকাশিত হয়েছে!");
+
+    const targetTokens = groupMembers.map(m => m.fcmToken).filter(Boolean);
+    if (targetTokens.length > 0) {
+      fetch('/api/send-push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tokens: targetTokens, title: `📢 ${titleStr}`, body: bodyStr })
+      }).catch(() => {});
+    }
   };
 
   const handleCreatePoll = async (e) => {
     e.preventDefault();
     if (!isTeacherOrHost || !pollQuestion.trim() || !pollOpt1.trim() || !pollOpt2.trim()) return;
     await addDoc(collection(db, 'group_polls'), {
-      groupId: selectedGroupId,
-      question: pollQuestion.trim(),
-      opt1: pollOpt1.trim(),
-      opt2: pollOpt2.trim(),
-      votes1: [],
-      votes2: [],
-      authorName: userProfile?.displayName || user.displayName,
-      clientTime: Date.now()
+      groupId: selectedGroupId, question: pollQuestion.trim(), opt1: pollOpt1.trim(), opt2: pollOpt2.trim(),
+      votes1: [], votes2: [], authorName: userProfile?.displayName || user.displayName, clientTime: Date.now()
     });
     setPollQuestion(''); setPollOpt1(''); setPollOpt2('');
+    showToast("📊 লাইভ পোল চালু হয়েছে!");
   };
 
   const handleVotePoll = async (poll, optionNum) => {
     if (!user) return;
     const v1 = (poll.votes1 || []).filter(id => id !== user.uid);
     const v2 = (poll.votes2 || []).filter(id => id !== user.uid);
-    if (optionNum === 1) v1.push(user.uid);
-    else v2.push(user.uid);
+    if (optionNum === 1) v1.push(user.uid); else v2.push(user.uid);
     await updateDoc(doc(db, 'group_polls', poll.id), { votes1: v1, votes2: v2 });
+  };
+
+  const handleAddRoutine = async (e) => {
+    e.preventDefault();
+    if (!isTeacherOrHost || !routineForm.time.trim() || !routineForm.subject.trim()) return;
+    await addDoc(collection(db, 'group_routines'), {
+      groupId: selectedGroupId, day: routineForm.day, time: routineForm.time.trim(),
+      subject: routineForm.subject.trim(), liveLink: routineForm.liveLink.trim(),
+      teacherName: userProfile?.displayName || user.displayName, clientTime: Date.now()
+    });
+    setRoutineForm({ day: 'শনিবার', time: '', subject: '', liveLink: '' });
+    showToast("ক্লাস রুটিন যুক্ত হয়েছে!");
+  };
+
+  const handleAddResource = async (e) => {
+    e.preventDefault();
+    if (!isTeacherOrHost || !resForm.title.trim() || !resForm.url.trim()) return;
+    await addDoc(collection(db, 'group_resources'), {
+      groupId: selectedGroupId, title: resForm.title.trim(), subject: resForm.subject.trim() || 'General',
+      url: resForm.url.trim(), teacherName: userProfile?.displayName || user.displayName, clientTime: Date.now()
+    });
+    setResForm({ title: '', subject: '', url: '' });
+    showToast("📚 লাইব্রেরিতে ফাইল যুক্ত হয়েছে!");
   };
 
   const handleAddHomework = async (e) => {
     e.preventDefault();
     if (!isTeacherOrHost || !hwTitle.trim()) return;
     await addDoc(collection(db, 'group_homeworks'), {
-      groupId: selectedGroupId,
-      title: hwTitle.trim(),
-      dueDate: hwDue || 'পরবর্তী ক্লাস',
-      teacherName: userProfile?.displayName || user.displayName,
-      completedBy: [],
-      clientTime: Date.now()
+      groupId: selectedGroupId, title: hwTitle.trim(), dueDate: hwDue || 'পরবর্তী ক্লাস',
+      teacherName: userProfile?.displayName || user.displayName, completedBy: [], clientTime: Date.now()
     });
     setHwTitle(''); setHwDue('');
   };
@@ -748,13 +851,10 @@ export default function App() {
   const handleToggleHomeworkDone = async (hw) => {
     if (!user) return;
     const list = hw.completedBy || [];
-    const myName = userProfile?.displayName || user.displayName;
     const exists = list.some(item => item.uid === user.uid);
-    const updated = exists
-      ? list.filter(item => item.uid !== user.uid)
-      : [...list, { uid: user.uid, name: myName }];
+    const updated = exists ? list.filter(item => item.uid !== user.uid) : [...list, { uid: user.uid, name: userProfile?.displayName || user.displayName }];
     await updateDoc(doc(db, 'group_homeworks', hw.id), { completedBy: updated });
-    if (!exists) addXp(20);
+    if (!exists) { addXp(20); showToast("হোমওয়ার্ক জমা হয়েছে! +20 XP"); }
   };
 
   const handleSaveAttendance = async () => {
@@ -763,53 +863,37 @@ export default function App() {
       const st = allUsers.find(u => u.uid === uid);
       return { uid, name: st?.displayName || 'Student', status };
     });
-    if (recordsArray.length === 0) {
-      alert("অন্তত একজন শিক্ষার্থীর উপস্থিতি বা অনুপস্থিতি নির্বাচন করুন।");
-      return;
-    }
+    if (recordsArray.length === 0) { showToast("অন্তত একজন শিক্ষার্থীর উপস্থিতি দিন।"); return; }
     await addDoc(collection(db, 'group_attendance'), {
-      groupId: selectedGroupId,
-      date: attDate,
-      takenBy: userProfile?.displayName || user.displayName,
-      records: recordsArray
+      groupId: selectedGroupId, date: attDate, takenBy: userProfile?.displayName || user.displayName, records: recordsArray
     });
-    alert(`${attDate} তারিখের উপস্থিতি সেভ হয়েছে!`);
+    showToast(`${attDate} তারিখের উপস্থিতি সেভ হয়েছে!`);
   };
 
   const handleSaveClassExam = async (e) => {
     e.preventDefault();
     if (!isTeacherOrHost || !examForm.title.trim()) return;
     const payload = {
-      groupId: selectedGroupId,
-      title: examForm.title.trim(),
-      date: examForm.date,
-      syllabus: examForm.syllabus.trim(),
-      resultsText: examForm.resultsText.trim(),
-      updatedBy: userProfile?.displayName || user.displayName,
-      clientTime: Date.now()
+      groupId: selectedGroupId, title: examForm.title.trim(), date: examForm.date,
+      syllabus: examForm.syllabus.trim(), resultsText: examForm.resultsText.trim(),
+      updatedBy: userProfile?.displayName || user.displayName, clientTime: Date.now()
     };
-    if (editingExamId) {
-      await updateDoc(doc(db, 'group_exams', editingExamId), payload);
-      setEditingExamId(null);
-    } else {
-      await addDoc(collection(db, 'group_exams'), payload);
-    }
+    if (editingExamId) { await updateDoc(doc(db, 'group_exams', editingExamId), payload); setEditingExamId(null); }
+    else { await addDoc(collection(db, 'group_exams'), payload); }
     setExamForm({ title: '', date: '', syllabus: '', resultsText: '' });
+    showToast("পরীক্ষার তথ্য সেভ হয়েছে!");
   };
 
   const handleAddRecordedClass = async (e) => {
     e.preventDefault();
     if (!isTeacherOrHost || !classForm.title.trim() || !classForm.videoUrl.trim()) return;
     await addDoc(collection(db, 'recorded_classes'), {
-      groupId: selectedGroupId,
-      title: classForm.title.trim(),
-      videoUrl: classForm.videoUrl.trim(),
-      notes: classForm.notes.trim(),
-      teacherName: userProfile?.displayName || user.displayName,
-      clientTime: Date.now(),
-      dateStr: new Date().toLocaleDateString('bn-BD')
+      groupId: selectedGroupId, title: classForm.title.trim(), videoUrl: classForm.videoUrl.trim(),
+      notes: classForm.notes.trim(), teacherName: userProfile?.displayName || user.displayName,
+      clientTime: Date.now(), dateStr: new Date().toLocaleDateString('bn-BD')
     });
     setClassForm({ title: '', videoUrl: '', notes: '' });
+    showToast("রেকর্ডেড ক্লাস যুক্ত হয়েছে!");
   };
 
   const handleProfilePhotoChange = async (e) => {
@@ -825,146 +909,99 @@ export default function App() {
     setSavingProfile(true);
     try {
       await updateDoc(doc(db, 'users', user.uid), {
-        displayName: editName.trim() || user.displayName,
-        bio: editBio.trim(),
-        photoURL: editPhoto
+        displayName: editName.trim() || user.displayName, bio: editBio.trim(), photoURL: editPhoto
       });
-      alert("আপনার প্রোফাইল আপডেট হয়েছে!");
-    } finally {
-      setSavingProfile(false);
-    }
+      showToast("প্রোফাইল আপডেট হয়েছে!");
+    } finally { setSavingProfile(false); }
   };
   const handleGenerateQuiz = async () => {
     if (!examTopic.trim()) return;
-    setLoadingQuiz(true);
-    setQuizQuestions([]);
-    setQuizFinished(false);
-    setCurrentQIndex(0);
-    setQuizScore(0);
-    setSelectedOption(null);
-
+    setLoadingQuiz(true); setQuizQuestions([]); setQuizFinished(false); setCurrentQIndex(0); setQuizScore(0); setSelectedOption(null);
     const prompt = `"${examTopic}" বিষয়ের ওপর ৫টি MCQ প্রশ্ন তৈরি করো শুদ্ধ বাংলায়। শুধুমাত্র JSON ফরম্যাটে উত্তর দেবে:
 [{"question": "প্রশ্ন", "options": ["ক", "খ", "গ", "ঘ"], "correctIndex": 0, "explanation": "সংক্ষিপ্ত ব্যাখ্যা"}]`;
-
     try {
       const raw = await callGeminiFast(prompt, "Always respond with valid raw JSON array only.", null, true);
-      const cleaned = raw.replace(/```json|```/g, '').trim();
-      const parsed = JSON.parse(cleaned);
+      const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
       if (Array.isArray(parsed) && parsed.length > 0) setQuizQuestions(parsed);
-    } catch (err) {
-      alert("কুইজ তৈরিতে সমস্যা: " + err.message);
-    } finally {
-      setLoadingQuiz(false);
-    }
+    } catch (err) { showToast("কুইজ তৈরিতে সমস্যা: " + err.message); } finally { setLoadingQuiz(false); }
   };
 
   const handleOptionSelect = (idx) => {
     if (selectedOption !== null) return;
     setSelectedOption(idx);
     const currentQ = quizQuestions[currentQIndex];
-    if (idx === currentQ.correctIndex) {
-      setQuizScore((s) => s + 1);
-      addXp(20);
-    } else {
-      setMistakes(prev => [{
-        id: Date.now(),
-        topic: examTopic,
-        question: currentQ.question,
-        yourAnswer: currentQ.options[idx],
-        correctAnswer: currentQ.options[currentQ.correctIndex],
-        explanation: currentQ.explanation
-      }, ...prev]);
+    if (idx === currentQ.correctIndex) { setQuizScore((s) => s + 1); addXp(20); }
+    else {
+      setMistakes(prev => [{ id: Date.now(), topic: examTopic, question: currentQ.question, yourAnswer: currentQ.options[idx], correctAnswer: currentQ.options[currentQ.correctIndex], explanation: currentQ.explanation }, ...prev]);
     }
   };
 
   const handleGenerateFlashcards = async () => {
     if (!flashTopic.trim()) return;
     setLoadingFlash(true);
-    const prompt = `"${flashTopic}" বিষয়ের ওপর ৬টি ফ্ল্যাশকার্ড তৈরি করো শুদ্ধ বাংলায়। শুধুমাত্র JSON ফরম্যাটে উত্তর দেবে:
-[{"front": "প্রশ্ন বা সূত্র", "back": "উত্তর বা সংজ্ঞা"}]`;
+    const prompt = `"${flashTopic}" বিষয়ের ওপর ৬টি ফ্ল্যাশকার্ড তৈরি করো শুদ্ধ বাংলায়। শুধুমাত্র JSON ফরম্যাটে উত্তর দেবে: [{"front": "প্রশ্ন বা সূত্র", "back": "উত্তর বা সংজ্ঞা"}]`;
     try {
       const raw = await callGeminiFast(prompt, "Respond strictly with valid JSON array.", null, true);
-      const cleaned = raw.replace(/```json|```/g, '').trim();
-      const parsed = JSON.parse(cleaned);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        setFlashcards(parsed);
-        setCardIndex(0);
-        setIsFlipped(false);
-        addXp(25);
-      }
-    } catch (err) {
-      alert("ফ্ল্যাশকার্ড তৈরিতে সমস্যা: " + err.message);
-    } finally {
-      setLoadingFlash(false);
-    }
+      const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
+      if (Array.isArray(parsed) && parsed.length > 0) { setFlashcards(parsed); setCardIndex(0); setIsFlipped(false); addXp(25); }
+    } catch (err) { showToast("ফ্ল্যাশকার্ড তৈরিতে সমস্যা: " + err.message); } finally { setLoadingFlash(false); }
   };
 
   const activeGroupObj = groups.find(g => g.id === selectedGroupId);
-  const myAccessibleGroups = isHost
-    ? groups
-    : groups.filter(g => g.teacherId === user?.uid || (g.members || []).includes(user?.uid));
+  const myAccessibleGroups = isHost ? groups : groups.filter(g => g.teacherId === user?.uid || (g.members || []).includes(user?.uid));
+  const groupMembers = selectedGroupId === 'global' ? allUsers : allUsers.filter(u => (activeGroupObj?.members || []).includes(u.uid));
 
-  const groupMembers = selectedGroupId === 'global'
-    ? allUsers
-    : allUsers.filter(u => (activeGroupObj?.members || []).includes(u.uid));
-
-  // নিজের উপস্থিতির হার (%) হিসাব
   const myTotalClasses = attendanceRecords.filter(rec => (rec.records || []).some(r => r.uid === user?.uid)).length;
   const myPresentClasses = attendanceRecords.filter(rec => (rec.records || []).some(r => r.uid === user?.uid && r.status === 'উপস্থিত')).length;
   const myAttendancePercent = myTotalClasses > 0 ? Math.round((myPresentClasses / myTotalClasses) * 100) : 100;
+  const myDoneHwCount = homeworks.filter(hw => (hw.completedBy || []).some(item => item.uid === user?.uid)).length;
+  const daysToTargetExam = targetExam.date ? Math.max(0, Math.ceil((new Date(targetExam.date) - new Date()) / (1000 * 60 * 60 * 24))) : null;
 
   const pinnedMessages = groupMsgs.filter(m => m.pinned);
   const formatTime = (sec) => `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
 
-  const bgMain = darkMode ? 'bg-[#0b0f19] text-slate-100' : 'bg-slate-50 text-slate-900';
-  const cardBg = darkMode ? 'bg-[#131a2b] border-slate-800' : 'bg-white border-slate-200 shadow-sm';
-  const inputBg = darkMode ? 'bg-[#1a2236] border-slate-700 text-white placeholder-slate-400' : 'bg-slate-100 border-slate-300 text-slate-900';
+  const bgMain = darkMode ? 'bg-[#070b14] text-slate-100' : 'bg-slate-50 text-slate-900';
+  const cardBg = darkMode ? 'bg-[#111827]/90 border-slate-800/80 backdrop-blur-md shadow-xl' : 'bg-white border-slate-200 shadow-sm';
+  const inputBg = darkMode ? 'bg-[#1a2236] border-slate-700/80 text-white placeholder-slate-400' : 'bg-slate-100 border-slate-300 text-slate-900';
 
   const roleBadge = () => {
-    if (currentRole === 'host') return <span className="bg-amber-400 text-slate-950 text-[10px] font-extrabold px-2 py-0.5 rounded-full flex items-center gap-1"><Shield className="w-3 h-3" /> HOST</span>;
-    if (currentRole === 'teacher') return <span className="bg-emerald-400 text-slate-950 text-[10px] font-extrabold px-2 py-0.5 rounded-full flex items-center gap-1"><UserCheck className="w-3 h-3" /> TEACHER</span>;
-    return <span className="bg-white/20 text-white text-[10px] font-bold px-2 py-0.5 rounded-full">STUDENT</span>;
+    if (currentRole === 'host') return <span className="bg-amber-400 text-slate-950 text-[9px] font-extrabold px-2 py-0.5 rounded-full flex items-center gap-0.5"><Shield className="w-2.5 h-2.5" /> HOST</span>;
+    if (currentRole === 'teacher') return <span className="bg-emerald-400 text-slate-950 text-[9px] font-extrabold px-2 py-0.5 rounded-full flex items-center gap-0.5"><UserCheck className="w-2.5 h-2.5" /> TEACHER</span>;
+    return <span className="bg-white/20 text-white text-[9px] font-bold px-2 py-0.5 rounded-full">STUDENT</span>;
   };
 
   return (
     <div className={`min-h-screen flex flex-col font-sans transition-colors duration-300 ${bgMain}`}>
-      <header className="sticky top-0 z-30 bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 text-white px-3 py-2.5 shadow-lg">
+      {/* স্মার্ট টোস্ট নোটিফিকেশন বার */}
+      {toastMsg && (
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 bg-indigo-600 text-white px-4 py-2 rounded-full text-xs font-bold shadow-2xl border border-indigo-400/50 animate-bounce">
+          {toastMsg}
+        </div>
+      )}
+
+      {/* প্রিমিয়াম গ্লাসমরফিজম হেডার */}
+      <header className="sticky top-0 z-30 bg-gradient-to-r from-indigo-600 via-violet-600 to-fuchsia-600 text-white px-3 py-2.5 shadow-xl">
         <div className="max-w-3xl mx-auto flex items-center justify-between gap-1.5">
           <div className="flex items-center gap-2">
-            <div className="bg-white/20 p-1.5 rounded-xl">
-              <Sparkles className="w-5 h-5 text-amber-300" />
-            </div>
+            <div className="bg-white/20 p-1.5 rounded-xl shadow-inner"><Sparkles className="w-5 h-5 text-amber-300" /></div>
             <div>
               <div className="flex items-center gap-1.5">
-                <h1 className="font-bold text-base tracking-tight leading-none">EduNexus AI</h1>
+                <h1 className="font-extrabold text-base tracking-tight leading-none">EduNexus AI</h1>
                 {user && roleBadge()}
               </div>
-              <span className="text-[10px] text-indigo-200 font-medium">Smart Classroom OS</span>
+              <span className="text-[10px] text-indigo-100/80 font-medium">Smart Classroom OS</span>
             </div>
           </div>
 
           <div className="flex items-center gap-1.5">
-            <button
-              onClick={handleEnableNotifications}
-              title={notifPermission === 'granted' ? 'নোটিফিকেশন চালু আছে' : 'নোটিফিকেশন চালু করুন'}
-              className={`p-1.5 rounded-full transition ${
-                notifPermission === 'granted'
-                  ? 'bg-emerald-400/25 text-emerald-200'
-                  : 'bg-amber-400 text-slate-950 animate-bounce'
-              }`}
-            >
+            <button onClick={handleEnableNotifications} className={`p-1.5 rounded-full transition ${notifPermission === 'granted' ? 'bg-emerald-400/25 text-emerald-200' : 'bg-amber-400 text-slate-950 animate-pulse'}`}>
               {notifPermission === 'granted' ? <BellRing className="w-4 h-4" /> : <Bell className="w-4 h-4" />}
             </button>
 
             <div className="flex items-center gap-1 bg-black/25 px-2 py-1 rounded-full text-[11px] font-mono">
-              <Clock className="w-3 h-3 text-emerald-300" />
-              <span>{formatTime(timerSeconds)}</span>
-              <button onClick={() => setTimerRunning(!timerRunning)} className="text-amber-300 ml-0.5">
-                {timerRunning ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
-              </button>
-              <button onClick={() => { setTimerRunning(false); setTimerSeconds(25 * 60); }} className="text-slate-300">
-                <RotateCcw className="w-3 h-3" />
-              </button>
+              <Clock className="w-3 h-3 text-emerald-300" /><span>{formatTime(timerSeconds)}</span>
+              <button onClick={() => setTimerRunning(!timerRunning)} className="text-amber-300">{timerRunning ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}</button>
+              <button onClick={() => { setTimerRunning(false); setTimerSeconds(25 * 60); }} className="text-slate-300"><RotateCcw className="w-3 h-3" /></button>
             </div>
 
             <button onClick={() => setDarkMode(!darkMode)} className="p-1.5 rounded-full bg-white/15">
@@ -974,13 +1011,11 @@ export default function App() {
             {!authLoading && (
               user ? (
                 <div className="flex items-center gap-1 bg-white/15 pl-1 pr-2 py-1 rounded-full">
-                  <img src={userProfile?.photoURL || user.photoURL || 'https://via.placeholder.com/32'} alt="User" className="w-6 h-6 rounded-full object-cover" />
-                  <button onClick={handleLogout} title="Sign Out" className="text-rose-200 hover:text-white">
-                    <LogOut className="w-3.5 h-3.5" />
-                  </button>
+                  <img src={userProfile?.photoURL || user.photoURL || 'https://via.placeholder.com/32'} alt="User" className="w-6 h-6 rounded-full object-cover bg-white" />
+                  <button onClick={handleLogout} className="text-rose-200 hover:text-white"><LogOut className="w-3.5 h-3.5" /></button>
                 </div>
               ) : (
-                <button onClick={handleGoogleSignIn} className="bg-white text-indigo-700 px-2.5 py-1 rounded-full text-xs font-bold flex items-center gap-1">
+                <button onClick={handleGoogleSignIn} className="bg-white text-indigo-700 px-2.5 py-1 rounded-full text-xs font-bold flex items-center gap-1 shadow">
                   <LogIn className="w-3.5 h-3.5" /><span>Sign In</span>
                 </button>
               )
@@ -990,21 +1025,18 @@ export default function App() {
       </header>
 
       <main className="flex-1 max-w-3xl w-full mx-auto p-3 pb-24 flex flex-col">
+        {/* ট্যাব ১: AI TUTOR */}
         {activeTab === 'tutor' && (
           <div className="flex-1 flex flex-col">
             <div className="flex items-center justify-between mb-2 px-1 gap-2">
-              <span className="text-xs font-semibold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
-                <Brain className="w-4 h-4" /> AI Tutor (Vision & Voice)
-              </span>
+              <span className="text-xs font-bold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5"><Brain className="w-4 h-4" /> AI Tutor (Vision & Voice)</span>
               <div className="flex items-center gap-2">
-                <select value={tutorMode} onChange={(e) => setTutorMode(e.target.value)} className={`text-xs px-2 py-1.5 rounded-lg border outline-none font-medium ${cardBg}`}>
+                <select value={tutorMode} onChange={(e) => setTutorMode(e.target.value)} className={`text-xs px-2.5 py-1.5 rounded-xl border outline-none font-semibold ${cardBg}`}>
                   <option value="Friendly Tutor">Friendly Tutor</option>
                   <option value="Exam Coach">Exam Coach</option>
                   <option value="Step-by-Step Math">Step-by-Step Math</option>
                 </select>
-                <button onClick={handleClearChat} className={`p-1.5 rounded-lg border text-slate-400 hover:text-rose-400 ${cardBg}`}>
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
+                <button onClick={handleClearChat} className={`p-1.5 rounded-xl border text-slate-400 hover:text-rose-400 ${cardBg}`}><Trash2 className="w-3.5 h-3.5" /></button>
               </div>
             </div>
 
@@ -1012,9 +1044,11 @@ export default function App() {
               {messages.map((msg) => (
                 <div key={msg.id} className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
                   <div className={`max-w-[86%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
-                    msg.sender === 'user' ? 'bg-indigo-600 text-white rounded-br-sm shadow-md' : darkMode ? 'bg-[#1e273d] text-slate-100 rounded-bl-sm border border-slate-700/60' : 'bg-slate-100 text-slate-800 rounded-bl-sm'
+                    msg.sender === 'user' ? 'bg-gradient-to-br from-indigo-600 to-violet-600 text-white rounded-br-sm shadow-md' : darkMode ? 'bg-[#1a2236] text-slate-100 rounded-bl-sm border border-slate-700/60' : 'bg-slate-100 text-slate-800 rounded-bl-sm'
                   }`}>
-                    {msg.image && <img src={msg.image} alt="Uploaded" className="max-h-48 rounded-xl mb-2 border border-white/20" />}
+                    {(msg.images?.length > 0 ? msg.images : msg.image ? [msg.image] : []).map((src, i) => (
+                      <img key={i} src={src} alt="Uploaded" className="max-h-48 rounded-xl mb-2 border border-white/20 bg-white" />
+                    ))}
                     {msg.text}
                     {msg.sender === 'ai' && (
                       <button onClick={() => handleSpeakText(msg.text)} className="mt-2 flex items-center gap-1 text-[11px] text-indigo-400 hover:text-indigo-300 font-semibold">
@@ -1033,43 +1067,43 @@ export default function App() {
               <div ref={chatEndRef} />
             </div>
 
-            {tutorImage && (
-              <div className="mt-2 flex items-center gap-2 bg-indigo-500/15 border border-indigo-500/30 p-2 rounded-xl">
-                <img src={tutorImage} alt="Preview" className="w-12 h-12 rounded-lg object-cover" />
-                <span className="text-xs text-indigo-300 flex-1">প্রশ্নের ছবি সংযুক্ত হয়েছে</span>
-                <button onClick={() => setTutorImage(null)} className="text-rose-400 p-1"><X className="w-4 h-4" /></button>
+            {tutorImages.length > 0 && (
+              <div className="mt-2 flex items-center gap-2 bg-indigo-500/15 border border-indigo-500/30 p-2 rounded-xl overflow-x-auto">
+                {tutorImages.map((imgSrc, idx) => (
+                  <div key={idx} className="relative shrink-0">
+                    <img src={imgSrc} alt="Preview" className="w-12 h-12 rounded-lg object-cover bg-white" />
+                    <button type="button" onClick={() => setTutorImages((prev) => prev.filter((_, i) => i !== idx))} className="absolute -top-1 -right-1 bg-rose-600 text-white rounded-full p-0.5"><X className="w-3 h-3" /></button>
+                  </div>
+                ))}
               </div>
             )}
 
             <form onSubmit={handleSendMessage} className="mt-2.5 flex gap-1.5 items-center">
-              <label className={`p-3 rounded-xl border cursor-pointer hover:border-indigo-500 ${cardBg}`} title="ছবি তুলে সমাধান">
+              <label className={`p-3 rounded-xl border cursor-pointer hover:border-indigo-500 ${cardBg}`}>
                 <Camera className="w-5 h-5 text-indigo-400" />
-                <input type="file" accept="image/*" onChange={handleTutorImageUpload} className="hidden" />
+                <input type="file" accept="image/*" multiple onChange={handleTutorImageUpload} className="hidden" />
               </label>
-              <button type="button" onClick={handleVoiceInput} className={`p-3 rounded-xl border ${isListening ? 'bg-rose-600 text-white animate-pulse' : cardBg}`} title="মুখে প্রশ্ন বলুন">
+              <button type="button" onClick={handleVoiceInput} className={`p-3 rounded-xl border ${isListening ? 'bg-rose-600 text-white animate-pulse' : cardBg}`}>
                 <Mic className="w-5 h-5 text-emerald-400" />
               </button>
               <input type="text" value={inputMsg} onChange={(e) => setInputMsg(e.target.value)} placeholder="প্রশ্ন লিখুন, বলুন বা ছবি দিন..." className={`flex-1 rounded-xl border px-3 py-3 text-sm outline-none focus:border-indigo-500 ${inputBg}`} />
-              <button type="submit" disabled={isTyping || (!inputMsg.trim() && !tutorImage)} className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white p-3 rounded-xl shadow-lg">
+              <button type="submit" disabled={isTyping || (!inputMsg.trim() && tutorImages.length === 0)} className="bg-gradient-to-r from-indigo-600 to-violet-600 disabled:opacity-50 text-white p-3 rounded-xl shadow-lg">
                 <Send className="w-5 h-5" />
               </button>
             </form>
           </div>
         )}
+        {/* ট্যাব ২: CLASSROOM */}
         {activeTab === 'classroom' && (
           <div className="space-y-3">
             <div className={`p-3 rounded-2xl border space-y-2.5 ${cardBg}`}>
               <div className="flex items-center justify-between gap-2">
                 <select value={selectedGroupId} onChange={(e) => setSelectedGroupId(e.target.value)} className={`flex-1 text-xs font-bold px-3 py-2 rounded-xl border outline-none ${inputBg}`}>
                   <option value="global">🌐 কমন স্টুডেন্ট কমিউনিটি (সবার জন্য)</option>
-                  {myAccessibleGroups.map(g => (
-                    <option key={g.id} value={g.id}>📚 {g.name} ({g.teacherName}) — কোড: {g.inviteCode}</option>
-                  ))}
+                  {myAccessibleGroups.map(g => <option key={g.id} value={g.id}>📚 {g.name} ({g.teacherName}) — কোড: {g.inviteCode}</option>)}
                 </select>
                 {currentRole === 'student' && !userProfile?.teacherRequest && user && (
-                  <button onClick={handleRequestTeacher} className="bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2.5 py-2 rounded-xl text-[11px] font-bold shrink-0">
-                    Teacher আবেদন
-                  </button>
+                  <button onClick={handleRequestTeacher} className="bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2.5 py-2 rounded-xl text-[11px] font-bold shrink-0">Teacher আবেদন</button>
                 )}
               </div>
 
@@ -1083,26 +1117,19 @@ export default function App() {
               <div className="flex flex-wrap gap-1.5 pt-1">
                 {[
                   { id: 'chat', label: 'চ্যাট', icon: MessageSquare },
-                  { id: 'notices', label: `নোটিশ ও পোল (${notices.length + polls.length})`, icon: Bell },
+                  { id: 'notices', label: `নোটিশ (${notices.length + polls.length})`, icon: Bell },
+                  { id: 'routine', label: 'রুটিন', icon: Calendar },
+                  { id: 'library', label: 'লাইব্রেরি', icon: FolderOpen },
                   { id: 'homework', label: `হোমওয়ার্ক (${homeworks.length})`, icon: FileCheck },
                   { id: 'attendance', label: 'উপস্থিতি', icon: ClipboardCheck },
-                  { id: 'exams', label: 'পরীক্ষা ও রেজাল্ট', icon: Award },
-                  { id: 'classes', label: 'রেকর্ডেড ক্লাস', icon: Video },
-                  { id: 'leaderboard', label: 'লিডারবোর্ড', icon: Medal },
+                  { id: 'exams', label: 'পরীক্ষা', icon: Award },
+                  { id: 'classes', label: 'ভিডিও', icon: Video },
+                  { id: 'leaderboard', label: 'র‍্যাংকিং', icon: Medal },
                   ...(isTeacherOrHost ? [{ id: 'manage', label: isHost ? 'Host কন্ট্রোল' : 'গ্রুপ তৈরি', icon: Shield }] : [])
                 ].map(st => {
                   const Icon = st.icon;
                   return (
-                    <button
-                      key={st.id}
-                      onClick={() => {
-                        setGroupSubTab(st.id);
-                        if (st.id === 'notices') setUnreadNoticeCount(0);
-                      }}
-                      className={`px-2.5 py-1.5 rounded-xl text-[11px] font-semibold flex items-center gap-1 transition ${
-                        groupSubTab === st.id ? 'bg-indigo-600 text-white' : 'bg-slate-800/40 text-slate-400'
-                      }`}
-                    >
+                    <button key={st.id} onClick={() => { setGroupSubTab(st.id); if (st.id === 'notices') setUnreadNoticeCount(0); }} className={`px-2.5 py-1.5 rounded-xl text-[11px] font-semibold flex items-center gap-1 transition ${groupSubTab === st.id ? 'bg-indigo-600 text-white shadow' : 'bg-slate-800/40 text-slate-400'}`}>
                       <Icon className="w-3.5 h-3.5" /><span>{st.label}</span>
                     </button>
                   );
@@ -1119,56 +1146,54 @@ export default function App() {
                   </div>
                 )}
 
-                <div className={`rounded-2xl border p-3 overflow-y-auto space-y-3 min-h-[44vh] max-h-[47vh] ${cardBg}`}>
-                  {groupMsgs.length === 0 ? (
-                    <p className="text-center text-xs text-slate-400 py-14">এই গ্রুপে এখনো কোনো মেসেজ নেই।</p>
-                  ) : (
-                    groupMsgs.map((m) => {
-                      const isMe = user && m.uid === user.uid;
-                      return (
-                        <div key={m.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-                          <div className="flex items-center gap-1.5 mb-0.5 px-1">
-                            {m.userPhoto && <img src={m.userPhoto} alt="" className="w-4 h-4 rounded-full object-cover" />}
-                            <span className="text-[11px] font-semibold text-indigo-400">{m.userName}</span>
-                            {m.senderRole === 'host' && <span className="text-[9px] bg-amber-400 text-black px-1.5 rounded font-bold">HOST</span>}
-                            {m.senderRole === 'teacher' && <span className="text-[9px] bg-emerald-400 text-black px-1.5 rounded font-bold">TEACHER</span>}
-                            {isTeacherOrHost && (
-                              <>
-                                <button onClick={() => handleTogglePinMsg(m)} className="text-amber-400 ml-1"><Pin className="w-3 h-3" /></button>
-                                <button onClick={() => deleteDoc(doc(db, 'group_messages', m.id))} className="text-rose-400"><Trash2 className="w-3 h-3" /></button>
-                              </>
-                            )}
-                          </div>
-                          <div className={`max-w-[82%] rounded-2xl px-3.5 py-2 text-sm ${
-                            isMe ? 'bg-emerald-600 text-white rounded-br-sm' : darkMode ? 'bg-[#1e273d] text-slate-100 rounded-bl-sm' : 'bg-slate-100 text-slate-800'
-                          }`}>
-                            {m.image && <img src={m.image} alt="Shared" className="max-h-52 rounded-xl mb-1.5" />}
-                            {m.text && <p className="whitespace-pre-wrap">{m.text}</p>}
-                          </div>
-                          <div className="flex items-center gap-2 mt-0.5 px-1">
-                            <span className="text-[10px] text-slate-400">{m.timeStr}</span>
-                            <button onClick={() => handleLikeMsg(m)} className="text-[11px] text-slate-400 hover:text-amber-400">👍 {(m.likes || []).length}</button>
-                          </div>
+                <div className={`rounded-2xl border p-3 overflow-y-auto space-y-3 min-h-[43vh] max-h-[46vh] ${cardBg}`}>
+                  {groupMsgs.length === 0 ? <p className="text-center text-xs text-slate-400 py-14">এই গ্রুপে এখনো কোনো মেসেজ নেই।</p> : groupMsgs.map((m) => {
+                    const isMe = user && m.uid === user.uid;
+                    return (
+                      <div key={m.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
+                        <div className="flex items-center gap-1.5 mb-0.5 px-1">
+                          {m.userPhoto && <img src={m.userPhoto} alt="" className="w-4 h-4 rounded-full object-cover" />}
+                          <span className="text-[11px] font-semibold text-indigo-400">{m.userName}</span>
+                          {m.senderRole === 'host' && <span className="text-[9px] bg-amber-400 text-black px-1.5 rounded font-bold">HOST</span>}
+                          {m.senderRole === 'teacher' && <span className="text-[9px] bg-emerald-400 text-black px-1.5 rounded font-bold">TEACHER</span>}
+                          <button onClick={() => setReplyToMsg(m)} className="text-slate-400 hover:text-indigo-400 ml-1"><Reply className="w-3 h-3" /></button>
+                          {isTeacherOrHost && (<><button onClick={() => handleTogglePinMsg(m)} className="text-amber-400"><Pin className="w-3 h-3" /></button><button onClick={() => deleteDoc(doc(db, 'group_messages', m.id))} className="text-rose-400"><Trash2 className="w-3 h-3" /></button></>)}
                         </div>
-                      );
-                    })
-                  )}
+                        <div className={`max-w-[82%] rounded-2xl px-3.5 py-2 text-sm ${isMe ? 'bg-emerald-600 text-white rounded-br-sm' : darkMode ? 'bg-[#1a2236] text-slate-100 rounded-bl-sm' : 'bg-slate-100 text-slate-800'}`}>
+                          {m.replyTo && <div className="text-[11px] bg-black/20 border-l-2 border-amber-400 px-2 py-1 rounded mb-1.5 truncate"><strong>{m.replyTo.name}:</strong> {m.replyTo.text}</div>}
+                          {(m.images?.length > 0 ? m.images : m.image ? [m.image] : []).map((src, i) => <img key={i} src={src} alt="Shared" className="max-h-52 rounded-xl mb-1.5 bg-white" />)}
+                          {m.text && <p className="whitespace-pre-wrap">{m.text}</p>}
+                        </div>
+                        <div className="flex items-center gap-2 mt-0.5 px-1">
+                          <span className="text-[10px] text-slate-400">{m.timeStr}</span>
+                          <button onClick={() => handleLikeMsg(m)} className="text-[11px] text-slate-400 hover:text-amber-400">👍 {(m.likes || []).length}</button>
+                        </div>
+                      </div>
+                    );
+                  })}
                   <div ref={commEndRef} />
                 </div>
 
-                {commImage && (
-                  <div className="mt-2 flex items-center gap-2 bg-emerald-500/15 border border-emerald-500/30 p-2 rounded-xl">
-                    <img src={commImage} alt="Preview" className="w-10 h-10 rounded object-cover" />
-                    <span className="text-xs text-emerald-300 flex-1">ছবি পাঠানোর জন্য প্রস্তুত</span>
-                    <button onClick={() => setCommImage(null)} className="text-rose-400"><X className="w-4 h-4" /></button>
+                {replyToMsg && (
+                  <div className="mt-2 flex items-center justify-between bg-indigo-500/15 border border-indigo-500/30 px-3 py-1.5 rounded-xl text-xs">
+                    <span className="truncate">রিপ্লাই: <strong>{replyToMsg.userName}</strong> — {replyToMsg.text || '📷 ছবি'}</span>
+                    <button onClick={() => setReplyToMsg(null)} className="text-rose-400"><X className="w-3.5 h-3.5" /></button>
+                  </div>
+                )}
+
+                {commImages.length > 0 && (
+                  <div className="mt-2 flex items-center gap-2 bg-emerald-500/15 border border-emerald-500/30 p-2 rounded-xl overflow-x-auto">
+                    {commImages.map((imgSrc, idx) => (
+                      <div key={idx} className="relative shrink-0">
+                        <img src={imgSrc} alt="Preview" className="w-12 h-12 rounded-lg object-cover bg-white" />
+                        <button type="button" onClick={() => setCommImages((prev) => prev.filter((_, i) => i !== idx))} className="absolute -top-1 -right-1 bg-rose-600 text-white rounded-full p-0.5"><X className="w-3 h-3" /></button>
+                      </div>
+                    ))}
                   </div>
                 )}
 
                 <form onSubmit={handleSendGroupMsg} className="mt-2 flex gap-2 items-center">
-                  <label className={`p-3 rounded-xl border cursor-pointer ${cardBg}`} title="চ্যাটে ছবি পাঠান">
-                    <ImageIcon className="w-5 h-5 text-emerald-400" />
-                    <input type="file" accept="image/*" onChange={handleCommImageSelect} className="hidden" />
-                  </label>
+                  <label className={`p-3 rounded-xl border cursor-pointer ${cardBg}`}><ImageIcon className="w-5 h-5 text-emerald-400" /><input type="file" accept="image/*" multiple onChange={handleCommImageSelect} className="hidden" /></label>
                   <input type="text" value={commInput} onChange={(e) => setCommInput(e.target.value)} placeholder={user ? "গ্রুপে মেসেজ বা নোট লিখুন..." : "চ্যাট করতে Sign In করুন"} className={`flex-1 rounded-xl border px-3.5 py-3 text-sm outline-none ${inputBg}`} />
                   <button type="submit" disabled={sendingComm} className="bg-emerald-600 text-white p-3 rounded-xl"><Send className="w-5 h-5" /></button>
                 </form>
@@ -1179,21 +1204,19 @@ export default function App() {
               <div className="space-y-3">
                 {notifPermission !== 'granted' && (
                   <button onClick={handleEnableNotifications} className="w-full p-3 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-200 text-xs font-bold flex items-center justify-center gap-2">
-                    <BellRing className="w-4 h-4" /> ফোনের নোটিফিকেশন অ্যালার্ট চালু করতে এখানে ট্যাপ করুন
+                    <BellRing className="w-4 h-4" /> হোম ও লক-স্ক্রিন নোটিফিকেশন চালু করতে ট্যাপ করুন
                   </button>
                 )}
-
                 {isTeacherOrHost ? (
                   <>
                     <form onSubmit={handlePostNotice} className={`p-4 rounded-2xl border space-y-2 ${cardBg}`}>
-                      <h3 className="text-sm font-bold text-amber-400 flex items-center gap-1.5"><Bell className="w-4 h-4" /> নোটিফিকেশন প্রকাশ করুন (Host/Teacher)</h3>
+                      <h3 className="text-sm font-bold text-amber-400 flex items-center gap-1.5"><Bell className="w-4 h-4" /> নোটিশ প্রকাশ করুন (লক-স্ক্রিন পুশসহ)</h3>
                       <input type="text" value={noticeTitle} onChange={(e) => setNoticeTitle(e.target.value)} placeholder="নোটিশের শিরোনাম" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
                       <textarea rows="2" value={noticeBody} onChange={(e) => setNoticeBody(e.target.value)} placeholder="বিস্তারিত নোটিশ..." className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
                       <button type="submit" className="bg-amber-500 text-slate-950 font-bold text-xs px-4 py-2 rounded-xl">নোটিশ পাঠান</button>
                     </form>
-
                     <form onSubmit={handleCreatePoll} className={`p-4 rounded-2xl border space-y-2 ${cardBg}`}>
-                      <h3 className="text-sm font-bold text-indigo-400 flex items-center gap-1.5"><BarChart2 className="w-4 h-4" /> নতুন লাইভ পোল তৈরি করুন</h3>
+                      <h3 className="text-sm font-bold text-indigo-400 flex items-center gap-1.5"><BarChart2 className="w-4 h-4" /> লাইভ পোল তৈরি করুন</h3>
                       <input type="text" value={pollQuestion} onChange={(e) => setPollQuestion(e.target.value)} placeholder="প্রশ্ন" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
                       <div className="grid grid-cols-2 gap-2">
                         <input type="text" value={pollOpt1} onChange={(e) => setPollOpt1(e.target.value)} placeholder="অপশন ১" className={`rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
@@ -1202,35 +1225,20 @@ export default function App() {
                       <button type="submit" className="bg-indigo-600 text-white font-bold text-xs px-4 py-2 rounded-xl">পোল প্রকাশ করুন</button>
                     </form>
                   </>
-                ) : (
-                  <div className="p-3 rounded-xl bg-slate-800/40 text-xs text-slate-400 flex items-center gap-2">
-                    <Lock className="w-4 h-4 text-amber-400" /> কেবল Teacher এবং Host নোটিফিকেশন ও পোল দিতে পারবেন।
-                  </div>
-                )}
+                ) : <div className="p-3 rounded-xl bg-slate-800/40 text-xs text-slate-400 flex items-center gap-2"><Lock className="w-4 h-4 text-amber-400" /> কেবল Teacher এবং Host নোটিশ দিতে পারবেন।</div>}
 
                 {polls.map(p => (
                   <div key={p.id} className={`p-4 rounded-2xl border space-y-2 ${cardBg}`}>
-                    <div className="flex justify-between">
-                      <h4 className="font-bold text-sm text-indigo-300">📊 {p.question}</h4>
-                      {isTeacherOrHost && <button onClick={() => deleteDoc(doc(db, 'group_polls', p.id))} className="text-rose-400"><Trash2 className="w-3.5 h-3.5" /></button>}
-                    </div>
+                    <div className="flex justify-between"><h4 className="font-bold text-sm text-indigo-300">📊 {p.question}</h4>{isTeacherOrHost && <button onClick={() => deleteDoc(doc(db, 'group_polls', p.id))} className="text-rose-400"><Trash2 className="w-3.5 h-3.5" /></button>}</div>
                     <div className="grid grid-cols-2 gap-2 text-xs">
-                      <button onClick={() => handleVotePoll(p, 1)} className="p-2.5 rounded-xl bg-indigo-600/20 border border-indigo-500/40 flex justify-between font-bold">
-                        <span>{p.opt1}</span><span>{(p.votes1 || []).length} ভোট</span>
-                      </button>
-                      <button onClick={() => handleVotePoll(p, 2)} className="p-2.5 rounded-xl bg-emerald-600/20 border border-emerald-500/40 flex justify-between font-bold">
-                        <span>{p.opt2}</span><span>{(p.votes2 || []).length} ভোট</span>
-                      </button>
+                      <button onClick={() => handleVotePoll(p, 1)} className="p-2.5 rounded-xl bg-indigo-600/20 border border-indigo-500/40 flex justify-between font-bold"><span>{p.opt1}</span><span>{(p.votes1 || []).length} ভোট</span></button>
+                      <button onClick={() => handleVotePoll(p, 2)} className="p-2.5 rounded-xl bg-emerald-600/20 border border-emerald-500/40 flex justify-between font-bold"><span>{p.opt2}</span><span>{(p.votes2 || []).length} ভোট</span></button>
                     </div>
                   </div>
                 ))}
-
                 {notices.map(n => (
                   <div key={n.id} className={`p-4 rounded-2xl border space-y-1 ${cardBg}`}>
-                    <div className="flex justify-between">
-                      <h4 className="font-bold text-sm text-amber-300">🔔 {n.title}</h4>
-                      {isTeacherOrHost && <button onClick={() => deleteDoc(doc(db, 'group_notices', n.id))} className="text-rose-400"><Trash2 className="w-3.5 h-3.5" /></button>}
-                    </div>
+                    <div className="flex justify-between"><h4 className="font-bold text-sm text-amber-300">🔔 {n.title}</h4>{isTeacherOrHost && <button onClick={() => deleteDoc(doc(db, 'group_notices', n.id))} className="text-rose-400"><Trash2 className="w-3.5 h-3.5" /></button>}</div>
                     <p className="text-xs whitespace-pre-wrap">{n.body}</p>
                     <span className="text-[10px] text-slate-400 block pt-1">প্রকাশক: {n.authorName} ({n.authorRole?.toUpperCase()}) • {n.dateStr}</span>
                   </div>
@@ -1238,32 +1246,80 @@ export default function App() {
               </div>
             )}
 
-            {groupSubTab === 'homework' && (
+            {groupSubTab === 'routine' && (
+              <div className="space-y-3">
+                {isTeacherOrHost && (
+                  <form onSubmit={handleAddRoutine} className={`p-4 rounded-2xl border space-y-2 ${cardBg}`}>
+                    <h3 className="text-sm font-bold text-indigo-400 flex items-center gap-1.5"><Calendar className="w-4 h-4" /> নতুন ক্লাস রুটিন যোগ করুন</h3>
+                    <div className="grid grid-cols-2 gap-2">
+                      <select value={routineForm.day} onChange={(e) => setRoutineForm({ ...routineForm, day: e.target.value })} className={`rounded-xl border px-3 py-2 text-xs ${inputBg}`}>
+                        {['শনিবার', 'রবিবার', 'সোমবার', 'মঙ্গলবার', 'বুধবার', 'বৃহস্পতিবার', 'শুক্রবার'].map(d => <option key={d} value={d}>{d}</option>)}
+                      </select>
+                      <input type="text" value={routineForm.time} onChange={(e) => setRoutineForm({ ...routineForm, time: e.target.value })} placeholder="সময় (রাত ৮:০০)" className={`rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
+                    </div>
+                    <input type="text" value={routineForm.subject} onChange={(e) => setRoutineForm({ ...routineForm, subject: e.target.value })} placeholder="বিষয়" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
+                    <input type="url" value={routineForm.liveLink} onChange={(e) => setRoutineForm({ ...routineForm, liveLink: e.target.value })} placeholder="লাইভ ক্লাস লিংক (ঐচ্ছিক)" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
+                    <button type="submit" className="bg-indigo-600 text-white font-bold text-xs px-4 py-2 rounded-xl">রুটিন যোগ করুন</button>
+                  </form>
+                )}
+                {routines.map(rt => (
+                  <div key={rt.id} className={`p-3.5 rounded-2xl border flex items-center justify-between gap-2 ${cardBg}`}>
+                    <div><span className="text-[11px] font-bold bg-indigo-500/20 text-indigo-300 px-2 py-0.5 rounded-full">{rt.day} • {rt.time}</span><h4 className="font-bold text-sm mt-1">{rt.subject}</h4><span className="text-[10px] text-slate-400">শিক্ষক: {rt.teacherName}</span></div>
+                    <div className="flex items-center gap-2">
+                      {rt.liveLink && <a href={rt.liveLink} target="_blank" rel="noreferrer" className="bg-emerald-600 text-white text-xs font-bold px-3 py-1.5 rounded-xl">Join Live</a>}
+                      {isTeacherOrHost && <button onClick={() => deleteDoc(doc(db, 'group_routines', rt.id))} className="text-rose-400"><Trash2 className="w-4 h-4" /></button>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* নতুন সাব-ট্যাব: PDF ও স্টাডি রিসোর্স লাইব্রেরি */}
+            {groupSubTab === 'library' && (
+              <div className="space-y-3">
+                {isTeacherOrHost && (
+                  <form onSubmit={handleAddResource} className={`p-4 rounded-2xl border space-y-2 ${cardBg}`}>
+                    <h3 className="text-sm font-bold text-sky-400 flex items-center gap-1.5"><FolderOpen className="w-4 h-4" /> PDF নোট বা বইয়ের লিংক যোগ করুন</h3>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input type="text" value={resForm.title} onChange={(e) => setResForm({ ...resForm, title: e.target.value })} placeholder="ফাইলের নাম (অধ্যায় ২ PDF)" className={`rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
+                      <input type="text" value={resForm.subject} onChange={(e) => setResForm({ ...resForm, subject: e.target.value })} placeholder="বিষয় (গণিত)" className={`rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
+                    </div>
+                    <input type="url" value={resForm.url} onChange={(e) => setResForm({ ...resForm, url: e.target.value })} placeholder="Google Drive / PDF লিংক দিন" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
+                    <button type="submit" className="bg-sky-600 text-white font-bold text-xs px-4 py-2 rounded-xl">লাইব্রেরিতে যুক্ত করুন</button>
+                  </form>
+                )}
+                {resources.length === 0 ? <p className="text-center text-xs text-slate-400 py-8">লাইব্রেরিতে এখনো কোনো PDF বা নোট যুক্ত হয়নি।</p> : resources.map(res => (
+                  <div key={res.id} className={`p-3.5 rounded-2xl border flex items-center justify-between gap-2 ${cardBg}`}>
+                    <div>
+                      <span className="text-[10px] font-bold bg-sky-500/20 text-sky-300 px-2 py-0.5 rounded-full">{res.subject}</span>
+                      <h4 className="font-bold text-sm mt-1">{res.title}</h4>
+                      <span className="text-[10px] text-slate-400">আপলোড: {res.teacherName}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <a href={res.url} target="_blank" rel="noreferrer" className="bg-sky-600 text-white text-xs font-bold px-3 py-1.5 rounded-xl flex items-center gap-1"><ExternalLink className="w-3.5 h-3.5" /> খুলুন</a>
+                      {isTeacherOrHost && <button onClick={() => deleteDoc(doc(db, 'group_resources', res.id))} className="text-rose-400"><Trash2 className="w-4 h-4" /></button>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+                        {groupSubTab === 'homework' && (
               <div className="space-y-3">
                 {isTeacherOrHost && (
                   <form onSubmit={handleAddHomework} className={`p-4 rounded-2xl border space-y-2 ${cardBg}`}>
                     <h3 className="text-sm font-bold text-emerald-400">নতুন হোমওয়ার্ক দিন</h3>
                     <input type="text" value={hwTitle} onChange={(e) => setHwTitle(e.target.value)} placeholder="হোমওয়ার্কের বিবরণ" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
-                    <input type="text" value={hwDue} onChange={(e) => setHwDue(e.target.value)} placeholder="জমা দেওয়ার শেষ তারিখ" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
+                    <input type="text" value={hwDue} onChange={(e) => setHwDue(e.target.value)} placeholder="শেষ তারিখ" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
                     <button type="submit" className="bg-emerald-600 text-white font-bold text-xs px-4 py-2 rounded-xl">হোমওয়ার্ক প্রকাশ করুন</button>
                   </form>
                 )}
-
                 {homeworks.map(hw => {
                   const isDone = user && (hw.completedBy || []).some(item => item.uid === user.uid);
                   return (
                     <div key={hw.id} className={`p-4 rounded-2xl border space-y-2 ${cardBg}`}>
-                      <div className="flex justify-between items-start">
-                        <div>
-                          <h4 className="font-bold text-sm">{hw.title}</h4>
-                          <span className="text-[11px] text-amber-400">শেষ সময়: {hw.dueDate} • শিক্ষক: {hw.teacherName}</span>
-                        </div>
-                        {isTeacherOrHost && <button onClick={() => deleteDoc(doc(db, 'group_homeworks', hw.id))} className="text-rose-400"><Trash2 className="w-4 h-4" /></button>}
-                      </div>
+                      <div className="flex justify-between items-start"><div><h4 className="font-bold text-sm">{hw.title}</h4><span className="text-[11px] text-amber-400">শেষ সময়: {hw.dueDate} • {hw.teacherName}</span></div>{isTeacherOrHost && <button onClick={() => deleteDoc(doc(db, 'group_homeworks', hw.id))} className="text-rose-400"><Trash2 className="w-4 h-4" /></button>}</div>
                       <div className="flex items-center justify-between pt-1">
-                        <button onClick={() => handleToggleHomeworkDone(hw)} className={`px-3 py-1.5 rounded-xl text-xs font-bold ${isDone ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-200'}`}>
-                          {isDone ? '✅ সম্পন্ন হয়েছে' : 'জমা দিন (Mark Done)'}
-                        </button>
+                        <button onClick={() => handleToggleHomeworkDone(hw)} className={`px-3 py-1.5 rounded-xl text-xs font-bold ${isDone ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-200'}`}>{isDone ? '✅ সম্পন্ন হয়েছে' : 'জমা দিন (Mark Done)'}</button>
                         <span className="text-[11px] text-slate-400">জমা দিয়েছে: {(hw.completedBy || []).length} জন</span>
                       </div>
                     </div>
@@ -1276,10 +1332,7 @@ export default function App() {
               <div className="space-y-3">
                 {isTeacherOrHost && (
                   <div className={`p-4 rounded-2xl border space-y-3 ${cardBg}`}>
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-sm font-bold text-emerald-400">উপস্থিতি ও অনুপস্থিতি নিন</h3>
-                      <input type="date" value={attDate} onChange={(e) => setAttDate(e.target.value)} className={`text-xs px-2.5 py-1.5 rounded-lg border ${inputBg}`} />
-                    </div>
+                    <div className="flex items-center justify-between"><h3 className="text-sm font-bold text-emerald-400">উপস্থিতি ও অনুপস্থিতি নিন</h3><input type="date" value={attDate} onChange={(e) => setAttDate(e.target.value)} className={`text-xs px-2.5 py-1.5 rounded-lg border ${inputBg}`} /></div>
                     <div className="space-y-2 max-h-48 overflow-y-auto">
                       {groupMembers.filter(m => m.role === 'student').map(st => (
                         <div key={st.uid} className="flex items-center justify-between text-xs p-2 rounded-xl bg-slate-800/30">
@@ -1294,76 +1347,39 @@ export default function App() {
                     <button onClick={handleSaveAttendance} className="w-full bg-emerald-600 text-white py-2 rounded-xl text-xs font-bold">উপস্থিতি সেভ করুন</button>
                   </div>
                 )}
-
                 {attendanceRecords.map(rec => (
                   <div key={rec.id} className={`p-3.5 rounded-2xl border space-y-2 ${cardBg}`}>
                     <div className="flex justify-between items-center text-xs font-bold text-indigo-400">
                       <span>তারিখ: {rec.date}</span>
-                      <div className="flex items-center gap-2">
-                        <span>শিক্ষক: {rec.takenBy}</span>
-                        {isTeacherOrHost && (
-                          <button
-                            onClick={() => {
-                              if (window.confirm(`${rec.date} তারিখের উপস্থিতি মুছে ফেলতে চান?`)) {
-                                deleteDoc(doc(db, 'group_attendance', rec.id));
-                              }
-                            }}
-                            className="text-rose-400 hover:text-rose-300"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        )}
-                      </div>
+                      <div className="flex items-center gap-2"><span>শিক্ষক: {rec.takenBy}</span>{isTeacherOrHost && <button onClick={() => { if (window.confirm(`${rec.date} তারিখের উপস্থিতি মুছতে চান?`)) deleteDoc(doc(db, 'group_attendance', rec.id)); }} className="text-rose-400"><Trash2 className="w-3.5 h-3.5" /></button>}</div>
                     </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      {(rec.records || []).map((r, i) => (
-                        <span key={i} className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${r.status === 'উপস্থিত' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
-                          {r.name}: {r.status}
-                        </span>
-                      ))}
-                    </div>
+                    <div className="flex flex-wrap gap-1.5">{(rec.records || []).map((r, i) => <span key={i} className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${r.status === 'উপস্থিত' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>{r.name}: {r.status}</span>)}</div>
                   </div>
                 ))}
               </div>
             )}
+
             {groupSubTab === 'exams' && (
               <div className="space-y-3">
                 {isTeacherOrHost ? (
                   <form onSubmit={handleSaveClassExam} className={`p-4 rounded-2xl border space-y-2.5 ${cardBg}`}>
-                    <h3 className="text-sm font-bold text-indigo-400">{editingExamId ? 'পরীক্ষার তথ্য Edit করুন' : 'নতুন পরীক্ষার তথ্য ও রেজাল্ট যোগ করুন'}</h3>
+                    <h3 className="text-sm font-bold text-indigo-400">{editingExamId ? 'পরীক্ষার তথ্য Edit করুন' : 'নতুন পরীক্ষার তথ্য ও রেজাল্ট'}</h3>
                     <div className="grid grid-cols-2 gap-2">
                       <input type="text" value={examForm.title} onChange={(e) => setExamForm({ ...examForm, title: e.target.value })} placeholder="পরীক্ষার নাম" className={`rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
                       <input type="date" value={examForm.date} onChange={(e) => setExamForm({ ...examForm, date: e.target.value })} className={`rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
                     </div>
                     <input type="text" value={examForm.syllabus} onChange={(e) => setExamForm({ ...examForm, syllabus: e.target.value })} placeholder="সিলেবাস ও পূর্ণমান" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
-                    <textarea rows="3" value={examForm.resultsText} onChange={(e) => setExamForm({ ...examForm, resultsText: e.target.value })} placeholder="শিক্ষার্থীদের প্রাপ্ত নম্বর / ফলাফল লিখুন..." className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
-                    <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-xs font-bold">{editingExamId ? 'আপডেট সেভ করুন' : 'পরীক্ষার তথ্য প্রকাশ করুন'}</button>
+                    <textarea rows="3" value={examForm.resultsText} onChange={(e) => setExamForm({ ...examForm, resultsText: e.target.value })} placeholder="প্রাপ্ত নম্বর / ফলাফল..." className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
+                    <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-xs font-bold">{editingExamId ? 'আপডেট সেভ করুন' : 'প্রকাশ করুন'}</button>
                   </form>
-                ) : (
-                  <div className="p-3 rounded-xl bg-slate-800/40 text-xs text-slate-400 flex items-center gap-2">
-                    <Lock className="w-4 h-4 text-indigo-400" /> পরীক্ষার তথ্য কেবল Teacher এবং Host Edit করতে পারবেন।
-                  </div>
-                )}
-
+                ) : <div className="p-3 rounded-xl bg-slate-800/40 text-xs text-slate-400 flex items-center gap-2"><Lock className="w-4 h-4 text-indigo-400" /> কেবল Teacher এবং Host Edit করতে পারবেন।</div>}
                 {classExams.map(ex => (
                   <div key={ex.id} className={`p-4 rounded-2xl border space-y-2 ${cardBg}`}>
                     <div className="flex justify-between items-start">
-                      <div>
-                        <h4 className="font-bold text-sm text-indigo-300">{ex.title}</h4>
-                        <span className="text-[11px] text-slate-400">তারিখ: {ex.date || 'নির্ধারিত নয়'} • {ex.syllabus}</span>
-                      </div>
-                      {isTeacherOrHost && (
-                        <div className="flex gap-2">
-                          <button onClick={() => { setEditingExamId(ex.id); setExamForm({ title: ex.title, date: ex.date, syllabus: ex.syllabus, resultsText: ex.resultsText }); }} className="text-amber-400"><Edit3 className="w-4 h-4" /></button>
-                          <button onClick={() => deleteDoc(doc(db, 'group_exams', ex.id))} className="text-rose-400"><Trash2 className="w-4 h-4" /></button>
-                        </div>
-                      )}
+                      <div><h4 className="font-bold text-sm text-indigo-300">{ex.title}</h4><span className="text-[11px] text-slate-400">তারিখ: {ex.date || 'নির্ধারিত নয়'} • {ex.syllabus}</span></div>
+                      {isTeacherOrHost && (<div className="flex gap-2"><button onClick={() => { setEditingExamId(ex.id); setExamForm({ title: ex.title, date: ex.date, syllabus: ex.syllabus, resultsText: ex.resultsText }); }} className="text-amber-400"><Edit3 className="w-4 h-4" /></button><button onClick={() => deleteDoc(doc(db, 'group_exams', ex.id))} className="text-rose-400"><Trash2 className="w-4 h-4" /></button></div>)}
                     </div>
-                    {ex.resultsText && (
-                      <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs whitespace-pre-wrap">
-                        <strong className="text-emerald-300 block mb-1">ফলাফল ও নম্বর তালিকা:</strong>{ex.resultsText}
-                      </div>
-                    )}
+                    {ex.resultsText && <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs whitespace-pre-wrap"><strong className="text-emerald-300 block mb-1">ফলাফল ও নম্বর:</strong>{ex.resultsText}</div>}
                   </div>
                 ))}
               </div>
@@ -1373,27 +1389,18 @@ export default function App() {
               <div className="space-y-3">
                 {isTeacherOrHost && (
                   <form onSubmit={handleAddRecordedClass} className={`p-4 rounded-2xl border space-y-2.5 ${cardBg}`}>
-                    <h3 className="text-sm font-bold text-violet-400 flex items-center gap-1.5"><Video className="w-4 h-4" /> নতুন রেকর্ডেড ক্লাস আপলোড করুন</h3>
+                    <h3 className="text-sm font-bold text-violet-400 flex items-center gap-1.5"><Video className="w-4 h-4" /> রেকর্ডেড ক্লাস আপলোড</h3>
                     <input type="text" value={classForm.title} onChange={(e) => setClassForm({ ...classForm, title: e.target.value })} placeholder="ক্লাসের শিরোনাম" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
-                    <input type="url" value={classForm.videoUrl} onChange={(e) => setClassForm({ ...classForm, videoUrl: e.target.value })} placeholder="ভিডিও লিংক (YouTube বা Google Drive)" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
-                    <input type="text" value={classForm.notes} onChange={(e) => setClassForm({ ...classForm, notes: e.target.value })} placeholder="ক্লাসের সংক্ষিপ্ত বিবরণ..." className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
-                    <button type="submit" className="bg-violet-600 text-white px-4 py-2 rounded-xl text-xs font-bold">রেকর্ডেড ক্লাস যুক্ত করুন</button>
+                    <input type="url" value={classForm.videoUrl} onChange={(e) => setClassForm({ ...classForm, videoUrl: e.target.value })} placeholder="YouTube বা Drive লিংক" className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
+                    <input type="text" value={classForm.notes} onChange={(e) => setClassForm({ ...classForm, notes: e.target.value })} placeholder="সংক্ষিপ্ত বিবরণ..." className={`w-full rounded-xl border px-3 py-2 text-xs ${inputBg}`} />
+                    <button type="submit" className="bg-violet-600 text-white px-4 py-2 rounded-xl text-xs font-bold">যুক্ত করুন</button>
                   </form>
                 )}
-
                 {recordedClasses.map(rc => (
                   <div key={rc.id} className={`p-4 rounded-2xl border space-y-2 ${cardBg}`}>
-                    <div className="flex justify-between items-start">
-                      <div>
-                        <h4 className="font-bold text-sm text-violet-300">{rc.title}</h4>
-                        <span className="text-[10px] text-slate-400">শিক্ষক: {rc.teacherName} • {rc.dateStr}</span>
-                      </div>
-                      {isTeacherOrHost && <button onClick={() => deleteDoc(doc(db, 'recorded_classes', rc.id))} className="text-rose-400"><Trash2 className="w-4 h-4" /></button>}
-                    </div>
+                    <div className="flex justify-between items-start"><div><h4 className="font-bold text-sm text-violet-300">{rc.title}</h4><span className="text-[10px] text-slate-400">{rc.teacherName} • {rc.dateStr}</span></div>{isTeacherOrHost && <button onClick={() => deleteDoc(doc(db, 'recorded_classes', rc.id))} className="text-rose-400"><Trash2 className="w-4 h-4" /></button>}</div>
                     {rc.notes && <p className="text-xs text-slate-300">{rc.notes}</p>}
-                    <a href={rc.videoUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 bg-violet-600 text-white text-xs font-bold px-3.5 py-2 rounded-xl">
-                      <Video className="w-3.5 h-3.5" /> ক্লাস ভিডিও দেখুন
-                    </a>
+                    <a href={rc.videoUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 bg-violet-600 text-white text-xs font-bold px-3.5 py-2 rounded-xl"><Video className="w-3.5 h-3.5" /> ভিডিও দেখুন</a>
                   </div>
                 ))}
               </div>
@@ -1401,15 +1408,11 @@ export default function App() {
 
             {groupSubTab === 'leaderboard' && (
               <div className={`p-4 rounded-2xl border space-y-2.5 ${cardBg}`}>
-                <h3 className="text-sm font-bold text-amber-400 flex items-center gap-1.5"><Medal className="w-4 h-4" /> টপ লার্নার্স লিডারবোর্ড (XP র‍্যাংকিং)</h3>
+                <h3 className="text-sm font-bold text-amber-400 flex items-center gap-1.5"><Medal className="w-4 h-4" /> টপ লার্নার্স লিডারবোর্ড</h3>
                 {[...groupMembers].sort((a, b) => (b.xp || 0) - (a.xp || 0)).map((member, index) => (
                   <div key={member.uid} className="flex items-center justify-between p-2.5 rounded-xl bg-slate-800/40 text-xs">
                     <div className="flex items-center gap-2.5">
-                      <span className={`w-6 h-6 rounded-full flex items-center justify-center font-extrabold ${
-                        index === 0 ? 'bg-amber-400 text-black' : index === 1 ? 'bg-slate-300 text-black' : index === 2 ? 'bg-amber-700 text-white' : 'bg-slate-700 text-slate-300'
-                      }`}>
-                        {index + 1}
-                      </span>
+                      <span className={`w-6 h-6 rounded-full flex items-center justify-center font-extrabold ${index === 0 ? 'bg-amber-400 text-black' : index === 1 ? 'bg-slate-300 text-black' : index === 2 ? 'bg-amber-700 text-white' : 'bg-slate-700 text-slate-300'}`}>{index + 1}</span>
                       <span className="font-bold">{member.displayName}</span>
                     </div>
                     <span className="font-bold text-amber-300">{member.xp || 150} XP</span>
@@ -1428,7 +1431,6 @@ export default function App() {
                   </div>
                   <button type="submit" className="bg-emerald-600 text-white px-4 py-2 rounded-xl text-xs font-bold">গ্রুপ তৈরি ও কোড পান</button>
                 </form>
-
                 {isHost && (
                   <div className={`p-4 rounded-2xl border space-y-3 ${cardBg}`}>
                     <h3 className="text-sm font-bold text-amber-400 flex items-center gap-1.5"><Shield className="w-4 h-4" /> Host Control: সকল ইউজার ও Teacher অনুমোদন</h3>
@@ -1438,21 +1440,12 @@ export default function App() {
                         return (
                           <div key={u.uid} className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-slate-800/40 text-xs">
                             <div className="min-w-0">
-                              <p className="font-bold truncate flex items-center gap-1.5">
-                                <span>{u.displayName}</span>
-                                {u.teacherRequest && <span className="bg-amber-500 text-black text-[9px] px-1.5 rounded font-bold">Teacher আবেদন</span>}
-                              </p>
+                              <p className="font-bold truncate flex items-center gap-1.5"><span>{u.displayName}</span>{u.teacherRequest && <span className="bg-amber-500 text-black text-[9px] px-1.5 rounded font-bold">Teacher আবেদন</span>}</p>
                               <p className="text-[10px] text-slate-400 truncate">{u.email}</p>
                             </div>
-                            {isTargetHost ? (
-                              <span className="text-[10px] font-bold text-amber-400 shrink-0">SUPER HOST</span>
-                            ) : (
+                            {isTargetHost ? <span className="text-[10px] font-bold text-amber-400 shrink-0">SUPER HOST</span> : (
                               <div className="flex gap-1.5 shrink-0">
-                                {u.role !== 'teacher' ? (
-                                  <button onClick={() => handleToggleUserRole(u, 'teacher')} className="bg-emerald-600 text-white px-2.5 py-1 rounded-lg font-bold text-[11px] flex items-center gap-1"><Check className="w-3 h-3" /> Teacher বানান</button>
-                                ) : (
-                                  <button onClick={() => handleToggleUserRole(u, 'student')} className="bg-rose-600 text-white px-2.5 py-1 rounded-lg font-bold text-[11px]">Student করুন</button>
-                                )}
+                                {u.role !== 'teacher' ? <button onClick={() => handleToggleUserRole(u, 'teacher')} className="bg-emerald-600 text-white px-2.5 py-1 rounded-lg font-bold text-[11px] flex items-center gap-1"><Check className="w-3 h-3" /> Teacher বানান</button> : <button onClick={() => handleToggleUserRole(u, 'student')} className="bg-rose-600 text-white px-2.5 py-1 rounded-lg font-bold text-[11px]">Student করুন</button>}
                               </div>
                             )}
                           </div>
@@ -1465,7 +1458,7 @@ export default function App() {
             )}
           </div>
         )}
-
+        {/* ট্যাব ৩: AI QUIZ */}
         {activeTab === 'exam' && (
           <div className="space-y-4">
             <div className={`p-4 rounded-2xl border ${cardBg}`}>
@@ -1475,12 +1468,9 @@ export default function App() {
                 <button onClick={handleGenerateQuiz} disabled={loadingQuiz || !examTopic.trim()} className="bg-indigo-600 text-white px-4 py-2.5 rounded-xl text-sm font-semibold">{loadingQuiz ? '...' : 'শুরু'}</button>
               </div>
             </div>
-
             {quizQuestions.length > 0 && !quizFinished && (
               <div className={`p-5 rounded-2xl border space-y-4 ${cardBg}`}>
-                <div className="flex justify-between text-xs font-semibold text-indigo-400">
-                  <span>প্রশ্ন {currentQIndex + 1} / {quizQuestions.length}</span><span>স্কোর: {quizScore}</span>
-                </div>
+                <div className="flex justify-between text-xs font-semibold text-indigo-400"><span>প্রশ্ন {currentQIndex + 1} / {quizQuestions.length}</span><span>স্কোর: {quizScore}</span></div>
                 <h3 className="font-bold text-base">{quizQuestions[currentQIndex].question}</h3>
                 <div className="space-y-2">
                   {quizQuestions[currentQIndex].options.map((opt, idx) => {
@@ -1502,27 +1492,22 @@ export default function App() {
                 </div>
                 {selectedOption !== null && (
                   <>
-                    <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-xs">
-                      <strong className="text-indigo-300">ব্যাখ্যা: </strong>{cleanAiOutput(quizQuestions[currentQIndex].explanation)}
-                    </div>
-                    <button onClick={() => currentQIndex + 1 < quizQuestions.length ? (setCurrentQIndex(i => i + 1), setSelectedOption(null)) : setQuizFinished(true)} className="w-full bg-indigo-600 text-white py-3 rounded-xl font-semibold text-sm">
-                      {currentQIndex + 1 === quizQuestions.length ? 'ফলাফল দেখুন' : 'পরবর্তী প্রশ্ন'}
-                    </button>
+                    <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-xs"><strong className="text-indigo-300">ব্যাখ্যা: </strong>{cleanAiOutput(quizQuestions[currentQIndex].explanation)}</div>
+                    <button onClick={() => currentQIndex + 1 < quizQuestions.length ? (setCurrentQIndex(i => i + 1), setSelectedOption(null)) : setQuizFinished(true)} className="w-full bg-indigo-600 text-white py-3 rounded-xl font-semibold text-sm">{currentQIndex + 1 === quizQuestions.length ? 'ফলাফল দেখুন' : 'পরবর্তী প্রশ্ন'}</button>
                   </>
                 )}
               </div>
             )}
-
             {quizFinished && (
               <div className={`p-6 rounded-2xl border text-center space-y-3 ${cardBg}`}>
-                <Award className="w-12 h-12 text-amber-400 mx-auto" />
-                <h3 className="text-xl font-bold">স্কোর: {quizScore} / {quizQuestions.length}</h3>
+                <Award className="w-12 h-12 text-amber-400 mx-auto" /><h3 className="text-xl font-bold">স্কোর: {quizScore} / {quizQuestions.length}</h3>
                 <button onClick={handleGenerateQuiz} className="bg-indigo-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold">আবার পরীক্ষা দিন</button>
               </div>
             )}
           </div>
         )}
 
+        {/* ট্যাব ৪: NOTES & CARDS */}
         {activeTab === 'flashcards' && (
           <div className="space-y-4">
             <div className={`p-4 rounded-2xl border ${cardBg}`}>
@@ -1534,7 +1519,7 @@ export default function App() {
             </div>
             {flashcards.length > 0 && (
               <div className="space-y-3">
-                <div onClick={() => setIsFlipped(!isFlipped)} className={`min-h-[180px] p-6 rounded-2xl border-2 cursor-pointer flex flex-col items-center justify-center text-center ${isFlipped ? 'border-violet-500 bg-violet-600/15' : cardBg}`}>
+                <div onClick={() => setIsFlipped(!isFlipped)} className={`min-h-[160px] p-6 rounded-2xl border-2 cursor-pointer flex flex-col items-center justify-center text-center ${isFlipped ? 'border-violet-500 bg-violet-600/15' : cardBg}`}>
                   <span className="text-[11px] font-bold text-violet-400 mb-2">{isFlipped ? 'উত্তর' : `কার্ড ${cardIndex + 1} / ${flashcards.length} (ট্যাপ করুন)`}</span>
                   <p className="text-base font-semibold">{cleanAiOutput(isFlipped ? flashcards[cardIndex].back : flashcards[cardIndex].front)}</p>
                 </div>
@@ -1544,68 +1529,91 @@ export default function App() {
                 </div>
               </div>
             )}
-
-            {/* AI শর্ট নোট জেনারেটর */}
             <div className={`p-4 rounded-2xl border space-y-3 ${cardBg}`}>
-              <h2 className="font-bold text-base flex items-center gap-2"><BookOpen className="w-5 h-5 text-emerald-400" /> AI Short Notes জেনারেটর</h2>
+              <h2 className="font-bold text-base flex items-center gap-2"><BookOpen className="w-5 h-5 text-emerald-400" /> AI Notes, সূত্র ও রচনা তৈরি</h2>
+              <div className="flex gap-1.5">
+                {[{ id: 'short_note', label: 'শর্ট নোট' }, { id: 'formula_sheet', label: 'সূত্র শিট' }, { id: 'essay', label: 'রচনা/অনুচ্ছেদ' }].map(t => (
+                  <button key={t.id} onClick={() => setNoteType(t.id)} className={`px-3 py-1 rounded-lg text-xs font-bold ${noteType === t.id ? 'bg-emerald-600 text-white' : 'bg-slate-800/40 text-slate-400'}`}>{t.label}</button>
+                ))}
+              </div>
               <div className="flex gap-2">
-                <input type="text" value={noteTopic} onChange={(e) => setNoteTopic(e.target.value)} placeholder="যেকোনো অধ্যায় লিখুন (যেমন: আলোর প্রতিফলন)" className={`flex-1 rounded-xl border px-3 py-2 text-xs outline-none ${inputBg}`} />
-                <button onClick={handleGenerateNotes} disabled={loadingNote} className="bg-emerald-600 text-white px-4 py-2 rounded-xl text-xs font-bold">{loadingNote ? '...' : 'নোট তৈরি'}</button>
+                <input type="text" value={noteTopic} onChange={(e) => setNoteTopic(e.target.value)} placeholder="অধ্যায় বা রচনার নাম লিখুন..." className={`flex-1 rounded-xl border px-3 py-2 text-xs outline-none ${inputBg}`} />
+                <button onClick={handleGenerateNotes} disabled={loadingNote} className="bg-emerald-600 text-white px-4 py-2 rounded-xl text-xs font-bold">{loadingNote ? '...' : 'তৈরি'}</button>
               </div>
               {generatedNote && (
                 <div className="p-3 rounded-xl bg-slate-800/40 text-xs whitespace-pre-wrap space-y-2">
                   <p>{generatedNote}</p>
-                  <button onClick={() => { navigator.clipboard.writeText(generatedNote); alert("নোট কপি হয়েছে!"); }} className="inline-flex items-center gap-1 text-emerald-400 font-bold">
-                    <Copy className="w-3.5 h-3.5" /> নোট কপি করুন
-                  </button>
+                  <button onClick={() => { navigator.clipboard.writeText(generatedNote); showToast("নোট কপি হয়েছে!"); }} className="inline-flex items-center gap-1 text-emerald-400 font-bold"><Copy className="w-3.5 h-3.5" /> কপি করুন</button>
                 </div>
               )}
             </div>
           </div>
         )}
 
+        {/* ট্যাব ৫: MY ID, EXAM COUNTDOWN & STUDY PLANNER */}
         {activeTab === 'profile' && (
           <div className="space-y-4">
-            <div className="grid grid-cols-3 gap-2.5">
-              <div className={`p-3 rounded-2xl border text-center ${cardBg}`}><Trophy className="w-5 h-5 text-amber-400 mx-auto mb-1" /><div className="text-base font-bold">{xp}</div><div className="text-[10px] text-slate-400">মোট XP</div></div>
-              <div className={`p-3 rounded-2xl border text-center ${cardBg}`}><ClipboardCheck className="w-5 h-5 text-emerald-400 mx-auto mb-1" /><div className="text-base font-bold">{myAttendancePercent}%</div><div className="text-[10px] text-slate-400">উপস্থিতি হার</div></div>
-              <div className={`p-3 rounded-2xl border text-center ${cardBg}`}><Shield className="w-5 h-5 text-indigo-400 mx-auto mb-1" /><div className="text-sm font-bold uppercase">{currentRole}</div><div className="text-[10px] text-slate-400">বর্তমান মোড</div></div>
+            <div className="grid grid-cols-4 gap-2">
+              <div className={`p-2.5 rounded-2xl border text-center ${cardBg}`}><Trophy className="w-4 h-4 text-amber-400 mx-auto mb-1" /><div className="text-sm font-bold">{xp}</div><div className="text-[9px] text-slate-400">মোট XP</div></div>
+              <div className={`p-2.5 rounded-2xl border text-center ${cardBg}`}><ClipboardCheck className="w-4 h-4 text-emerald-400 mx-auto mb-1" /><div className="text-sm font-bold">{myAttendancePercent}%</div><div className="text-[9px] text-slate-400">উপস্থিতি</div></div>
+              <div className={`p-2.5 rounded-2xl border text-center ${cardBg}`}><FileCheck className="w-4 h-4 text-sky-400 mx-auto mb-1" /><div className="text-sm font-bold">{myDoneHwCount}</div><div className="text-[9px] text-slate-400">হোমওয়ার্ক</div></div>
+              <div className={`p-2.5 rounded-2xl border text-center ${cardBg}`}><Shield className="w-4 h-4 text-indigo-400 mx-auto mb-1" /><div className="text-xs font-bold uppercase">{currentRole}</div><div className="text-[9px] text-slate-400">মোড</div></div>
+            </div>
+
+            <div className={`p-4 rounded-2xl border space-y-2.5 ${cardBg}`}>
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-bold text-indigo-400 flex items-center gap-1.5"><Target className="w-4 h-4" /> পরীক্ষার কাউন্টডাউন ও AI প্ল্যানার</h3>
+                {daysToTargetExam !== null && <span className="bg-rose-500/20 text-rose-300 text-[11px] font-extrabold px-2.5 py-0.5 rounded-full">বাকি {daysToTargetExam} দিন</span>}
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <input type="text" value={targetExam.name} onChange={(e) => setTargetExam({ ...targetExam, name: e.target.value })} placeholder="পরীক্ষার নাম" className={`rounded-xl border px-3 py-1.5 text-xs ${inputBg}`} />
+                <input type="date" value={targetExam.date} onChange={(e) => setTargetExam({ ...targetExam, date: e.target.value })} className={`rounded-xl border px-3 py-1.5 text-xs ${inputBg}`} />
+              </div>
+              <button onClick={handleGenerateStudyPlan} disabled={loadingPlan} className="w-full bg-indigo-600 text-white py-2 rounded-xl text-xs font-bold">
+                {loadingPlan ? 'AI রুটিন তৈরি করছে...' : '✨ AI দিয়ে প্রস্তুতির রুটিন বানান'}
+              </button>
+              {studyPlan && <div className="p-3 rounded-xl bg-slate-800/40 text-xs whitespace-pre-wrap">{studyPlan}</div>}
+            </div>
+
+            <div className={`p-4 rounded-2xl border space-y-2.5 ${cardBg}`}>
+              <h3 className="text-sm font-bold text-emerald-400 flex items-center gap-1.5"><CheckSquare className="w-4 h-4" /> আজকের পড়ার লক্ষ্য (+15 XP)</h3>
+              <form onSubmit={handleAddTodo} className="flex gap-2">
+                <input type="text" value={todoInput} onChange={(e) => setTodoInput(e.target.value)} placeholder="নতুন টার্গেট লিখুন..." className={`flex-1 rounded-xl border px-3 py-1.5 text-xs outline-none ${inputBg}`} />
+                <button type="submit" className="bg-emerald-600 text-white px-3 py-1.5 rounded-xl text-xs font-bold"><Plus className="w-4 h-4" /></button>
+              </form>
+              <div className="space-y-1.5">
+                {todos.map(t => (
+                  <div key={t.id} className="flex items-center justify-between text-xs p-2 rounded-xl bg-slate-800/30">
+                    <button onClick={() => handleToggleTodo(t.id)} className={`flex items-center gap-2 text-left flex-1 ${t.done ? 'line-through text-slate-500' : ''}`}><CheckCircle2 className={`w-4 h-4 shrink-0 ${t.done ? 'text-emerald-400' : 'text-slate-500'}`} /><span>{t.text}</span></button>
+                    <button onClick={() => setTodos(prev => prev.filter(item => item.id !== t.id))} className="text-rose-400 ml-2"><Trash2 className="w-3.5 h-3.5" /></button>
+                  </div>
+                ))}
+              </div>
             </div>
 
             {user ? (
               <form onSubmit={handleSaveProfile} className={`p-4 rounded-2xl border space-y-3 ${cardBg}`}>
-                <h2 className="font-bold text-base flex items-center gap-2"><Edit3 className="w-4 h-4 text-indigo-400" /> আপনার আইডি ও প্রোফাইল ছবি Edit করুন</h2>
+                <h2 className="font-bold text-base flex items-center gap-2"><Edit3 className="w-4 h-4 text-indigo-400" /> প্রোফাইল ও ছবি Edit করুন</h2>
                 <div className="flex items-center gap-4">
-                  <img src={editPhoto || 'https://via.placeholder.com/80'} alt="Profile" className="w-16 h-16 rounded-full object-cover border-2 border-indigo-500" />
-                  <label className="bg-indigo-600/20 text-indigo-300 border border-indigo-500/40 px-3 py-2 rounded-xl text-xs font-bold cursor-pointer">
-                    নতুন ছবি আপলোড করুন
-                    <input type="file" accept="image/*" onChange={handleProfilePhotoChange} className="hidden" />
-                  </label>
+                  <img src={editPhoto || 'https://via.placeholder.com/80'} alt="Profile" className="w-16 h-16 rounded-full object-cover border-2 border-indigo-500 bg-white" />
+                  <label className="bg-indigo-600/20 text-indigo-300 border border-indigo-500/40 px-3 py-2 rounded-xl text-xs font-bold cursor-pointer">নতুন ছবি দিন<input type="file" accept="image/*" onChange={handleProfilePhotoChange} className="hidden" /></label>
                 </div>
                 <input type="text" value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="আপনার নাম" className={`w-full rounded-xl border px-3 py-2 text-sm ${inputBg}`} />
                 <input type="text" value={editBio} onChange={(e) => setEditBio(e.target.value)} placeholder="পরিচিতি / শ্রেণি (Bio)" className={`w-full rounded-xl border px-3 py-2 text-sm ${inputBg}`} />
-                                <button type="submit" disabled={savingProfile} className="w-full bg-indigo-600 text-white py-2.5 rounded-xl text-sm font-bold">{savingProfile ? 'সেভ হচ্ছে...' : 'প্রোফাইল সেভ করুন'}</button>
+                <button type="submit" disabled={savingProfile} className="w-full bg-indigo-600 text-white py-2.5 rounded-xl text-sm font-bold">{savingProfile ? 'সেভ হচ্ছে...' : 'প্রোফাইল সেভ করুন'}</button>
               </form>
             ) : (
-              <div className={`p-6 rounded-2xl border text-center space-y-3 ${cardBg}`}>
-                <p className="text-sm">প্রোফাইল ও ক্লাসরুম ব্যবহার করতে প্রথমে Google Sign In করুন।</p>
-                <button onClick={handleGoogleSignIn} className="bg-indigo-600 text-white px-5 py-2.5 rounded-xl text-sm font-bold">Google Sign In</button>
-              </div>
+              <div className={`p-6 rounded-2xl border text-center space-y-3 ${cardBg}`}><p className="text-sm">প্রোফাইল ও ক্লাসরুম ব্যবহার করতে Google Sign In করুন।</p><button onClick={handleGoogleSignIn} className="bg-indigo-600 text-white px-5 py-2.5 rounded-xl text-sm font-bold">Google Sign In</button></div>
             )}
 
-            {/* ভুল প্রশ্নের খাতা (Mistake Log) */}
             {mistakes.length > 0 && (
               <div className={`p-4 rounded-2xl border space-y-2.5 ${cardBg}`}>
                 <h3 className="text-sm font-bold text-rose-400 flex items-center gap-1.5"><AlertTriangle className="w-4 h-4" /> ভুল প্রশ্নের খাতা ({mistakes.length}টি)</h3>
                 {mistakes.map(m => (
                   <div key={m.id} className="p-3 rounded-xl bg-slate-800/40 text-xs space-y-1">
-                    <p className="font-bold">{m.question}</p>
-                    <p className="text-rose-400">আপনার উত্তর: {m.yourAnswer}</p>
-                    <p className="text-emerald-400">সঠিক উত্তর: {m.correctAnswer}</p>
+                    <p className="font-bold">{m.question}</p><p className="text-rose-400">আপনার উত্তর: {m.yourAnswer}</p><p className="text-emerald-400">সঠিক উত্তর: {m.correctAnswer}</p>
                     {m.explanation && <p className="text-slate-300 pt-1">{cleanAiOutput(m.explanation)}</p>}
-                    <button onClick={() => handleExplainMistake(m)} className="text-indigo-400 font-bold pt-1">
-                      {explainingMistakeId === m.id ? 'AI বুঝিয়ে লিখছে...' : '✨ AI দিয়ে আরও সহজে বুঝুন'}
-                    </button>
+                    <button onClick={() => handleExplainMistake(m)} className="text-indigo-400 font-bold pt-1">{explainingMistakeId === m.id ? 'AI লিখছে...' : '✨ AI দিয়ে সহজে বুঝুন'}</button>
                   </div>
                 ))}
               </div>
@@ -1614,32 +1622,22 @@ export default function App() {
         )}
       </main>
 
-      <nav className={`fixed bottom-0 inset-x-0 z-30 border-t backdrop-blur-md ${darkMode ? 'bg-[#0f1524]/95 border-slate-800' : 'bg-white/95 border-slate-200'}`}>
+      {/* বটম নেভিগেশন বার */}
+      <nav className={`fixed bottom-0 inset-x-0 z-30 border-t backdrop-blur-xl ${darkMode ? 'bg-[#0b0f19]/90 border-slate-800' : 'bg-white/95 border-slate-200'}`}>
         <div className="max-w-3xl mx-auto grid grid-cols-5 py-1.5">
           {[
             { id: 'tutor', label: 'AI Tutor', icon: Brain },
             { id: 'classroom', label: 'Classroom', icon: Users, badge: unreadNoticeCount },
             { id: 'exam', label: 'AI Quiz', icon: HelpCircle },
-            { id: 'flashcards', label: 'Notes & Cards', icon: Layers },
+            { id: 'flashcards', label: 'Notes', icon: Layers },
             { id: 'profile', label: 'My ID', icon: Edit3 }
           ].map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
             return (
-              <button
-                key={tab.id}
-                onClick={() => {
-                  setActiveTab(tab.id);
-                  if (tab.id === 'classroom') setUnreadNoticeCount(0);
-                }}
-                className={`relative flex flex-col items-center justify-center py-1.5 text-[11px] font-medium ${isActive ? 'text-indigo-400 font-bold' : 'text-slate-400'}`}
-              >
+              <button key={tab.id} onClick={() => { setActiveTab(tab.id); if (tab.id === 'classroom') setUnreadNoticeCount(0); }} className={`relative flex flex-col items-center justify-center py-1.5 text-[11px] font-medium ${isActive ? 'text-indigo-400 font-bold' : 'text-slate-400'}`}>
                 <Icon className={`w-5 h-5 mb-0.5 ${isActive ? 'text-indigo-400' : ''}`} />
-                {tab.badge > 0 && (
-                  <span className="absolute top-1 right-5 bg-rose-500 text-white text-[9px] font-extrabold w-4 h-4 rounded-full flex items-center justify-center">
-                    {tab.badge}
-                  </span>
-                )}
+                {tab.badge > 0 && <span className="absolute top-1 right-5 bg-rose-500 text-white text-[9px] font-extrabold w-4 h-4 rounded-full flex items-center justify-center">{tab.badge}</span>}
                 <span>{tab.label}</span>
               </button>
             );
